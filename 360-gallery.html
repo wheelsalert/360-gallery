@@ -1,0 +1,656 @@
+<!DOCTYPE html>
+<!--
+  ============================================================
+  360° Gallery
+  ============================================================
+  Version  : 1.0.2
+  Date     : 2025-06-25
+  File     : 360-gallery.html
+
+  Changelog:
+  1.0.1 - Fix volume/mute button not appearing in video viewer
+        - hiddenVideo element was created with muted=true (required
+          for thumbnail generation); now explicitly set muted=false
+          before handing to PSV so the navbar volume button works
+
+  1.0.0 - Initial release
+        - Single-file gallery, no server or build step required
+        - Drag-and-drop or file picker import (multi-select)
+        - Equirectangular centre-crop thumbnails (33-66% width,
+          25-75% height) — instant, no WebGL required
+        - Video thumbnails: waits for loadeddata before seeking
+          to avoid black frames; no crossOrigin on blob URLs
+        - Filter by all / photos / videos
+        - Sort by name, date added, type
+        - Fullscreen PSV viewer (same fixes as 360-viewer.html)
+        - VideoPlugin with volume/mute button in navbar
+          ('caption' slot used to surface play + volume controls)
+        - Keyboard nav: Esc close, ←→ prev/next
+        - Swipe nav on mobile (>60px threshold)
+        - AutorotatePlugin on both photo and video viewers
+
+  Dependencies:
+        - three@0.184.0
+        - @photo-sphere-viewer/core@5.14.2
+        - @photo-sphere-viewer/equirectangular-video-adapter@5.14.2
+        - @photo-sphere-viewer/video-plugin@5.14.2
+        - @photo-sphere-viewer/autorotate-plugin@5.14.2
+  ============================================================
+-->
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>360° Gallery</title>
+
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@photo-sphere-viewer/core@5.14.2/index.min.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@photo-sphere-viewer/video-plugin@5.14.2/index.min.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@photo-sphere-viewer/autorotate-plugin@5.14.2/index.min.css">
+
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://cdn.jsdelivr.net/npm/three@0.184.0/build/three.module.js",
+      "@photo-sphere-viewer/core":                          "https://cdn.jsdelivr.net/npm/@photo-sphere-viewer/core@5.14.2/index.module.js",
+      "@photo-sphere-viewer/equirectangular-video-adapter": "https://cdn.jsdelivr.net/npm/@photo-sphere-viewer/equirectangular-video-adapter@5.14.2/index.module.js",
+      "@photo-sphere-viewer/video-plugin":                  "https://cdn.jsdelivr.net/npm/@photo-sphere-viewer/video-plugin@5.14.2/index.module.js",
+      "@photo-sphere-viewer/autorotate-plugin":             "https://cdn.jsdelivr.net/npm/@photo-sphere-viewer/autorotate-plugin@5.14.2/index.module.js"
+    }
+  }
+  </script>
+
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:        #0a0a0a;
+      --surface:   #141414;
+      --surface2:  #1e1e1e;
+      --border:    rgba(255,255,255,0.08);
+      --border2:   rgba(255,255,255,0.14);
+      --text:      #e8e8e8;
+      --muted:     #666;
+      --accent:    #5b8dee;
+      --accent-dim:#1e2d4a;
+      --radius:    10px;
+      --thumb-h:   200px;
+    }
+
+    html, body {
+      height: 100%;
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      font-size: 14px;
+      line-height: 1.5;
+      overflow-x: hidden;
+    }
+
+    header {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      padding: 16px 24px;
+      border-bottom: 1px solid var(--border);
+      position: sticky;
+      top: 0;
+      background: rgba(10,10,10,0.92);
+      backdrop-filter: blur(12px);
+      z-index: 50;
+    }
+
+    .logo { font-size: 16px; font-weight: 600; letter-spacing: -0.3px; color: #fff; flex-shrink: 0; }
+    .logo span { color: var(--accent); }
+
+    .header-controls { display: flex; align-items: center; gap: 8px; margin-left: auto; flex-wrap: wrap; }
+
+    .filter-group {
+      display: flex;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      overflow: hidden;
+    }
+    .filter-btn {
+      background: none; border: none; color: var(--muted);
+      padding: 6px 14px; font-size: 13px; cursor: pointer;
+      transition: color 0.15s, background 0.15s;
+    }
+    .filter-btn:hover { color: var(--text); background: var(--surface2); }
+    .filter-btn.active { color: #fff; background: var(--accent-dim); }
+
+    .sort-select {
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: var(--radius); color: var(--text);
+      padding: 6px 10px; font-size: 13px; cursor: pointer; outline: none;
+    }
+    .sort-select:focus { border-color: var(--accent); }
+
+    .import-btn {
+      display: flex; align-items: center; gap: 6px;
+      padding: 6px 14px; background: var(--accent); color: #fff;
+      border: none; border-radius: var(--radius);
+      font-size: 13px; font-weight: 500; cursor: pointer; transition: opacity 0.15s;
+    }
+    .import-btn:hover { opacity: 0.85; }
+    #file-input { display: none; }
+
+    .item-count { font-size: 12px; color: var(--muted); white-space: nowrap; }
+
+    main { padding: 24px; min-height: calc(100vh - 57px); }
+
+    #drop-zone {
+      display: flex; flex-direction: column; align-items: center;
+      justify-content: center; gap: 16px;
+      min-height: calc(100vh - 140px); text-align: center;
+    }
+    #drop-zone.hidden { display: none; }
+
+    .drop-ring {
+      width: 120px; height: 120px;
+      border: 2px dashed var(--border2); border-radius: 50%;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 40px; transition: border-color 0.2s, background 0.2s;
+    }
+    body.dragging-over .drop-ring { border-color: var(--accent); background: var(--accent-dim); }
+
+    #drop-zone h2 { font-size: 20px; font-weight: 600; color: #fff; }
+    #drop-zone p  { font-size: 13px; color: var(--muted); max-width: 320px; }
+    #drop-zone em { color: var(--accent); font-style: normal; }
+
+    #gallery {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+      gap: 16px;
+    }
+    #gallery.hidden { display: none; }
+
+    .card {
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: var(--radius); overflow: hidden; cursor: pointer;
+      transition: border-color 0.15s, transform 0.15s; position: relative;
+    }
+    .card:hover { border-color: var(--border2); transform: translateY(-2px); }
+    .card:hover .card-overlay { opacity: 1; }
+
+    .card-thumb {
+      width: 100%; height: var(--thumb-h);
+      object-fit: cover; display: block; background: var(--surface2);
+    }
+    .card-thumb-placeholder {
+      width: 100%; height: var(--thumb-h); background: var(--surface2);
+      display: flex; align-items: center; justify-content: center;
+      font-size: 32px; color: var(--muted);
+    }
+    .card-overlay {
+      position: absolute; inset: 0 0 auto 0; height: var(--thumb-h);
+      background: rgba(0,0,0,0.3); display: flex; align-items: center;
+      justify-content: center; opacity: 0; transition: opacity 0.2s; font-size: 36px;
+    }
+    .card-body { padding: 10px 12px 12px; }
+    .card-badges { display: flex; gap: 6px; margin-bottom: 6px; }
+    .badge { font-size: 10px; font-weight: 600; letter-spacing: 0.4px; text-transform: uppercase; padding: 2px 7px; border-radius: 4px; }
+    .badge-photo { background: rgba(91,141,238,0.15); color: #7aa3f0; }
+    .badge-video { background: rgba(255,165,50,0.15); color: #ffa832; }
+    .card-name { font-size: 13px; font-weight: 500; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-bottom: 2px; }
+    .card-meta { font-size: 11px; color: var(--muted); }
+
+    #viewer-overlay {
+      position: fixed; inset: 0; background: #000; z-index: 100;
+      display: none; flex-direction: column;
+    }
+    #viewer-overlay.open { display: flex; }
+
+    .viewer-header {
+      display: flex; align-items: center; gap: 12px;
+      padding: 12px 16px; background: rgba(0,0,0,0.6);
+      position: absolute; top: 0; left: 0; right: 0; z-index: 10;
+    }
+    .viewer-close {
+      background: rgba(255,255,255,0.1); border: none; color: #fff;
+      width: 36px; height: 36px; border-radius: 8px; font-size: 18px;
+      cursor: pointer; display: flex; align-items: center; justify-content: center;
+      transition: background 0.15s;
+    }
+    .viewer-close:hover { background: rgba(255,255,255,0.2); }
+    .viewer-title { font-size: 14px; font-weight: 500; color: #fff; flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .viewer-nav { display: flex; gap: 6px; }
+    .viewer-nav button {
+      background: rgba(255,255,255,0.1); border: none; color: #fff;
+      width: 36px; height: 36px; border-radius: 8px; font-size: 18px;
+      cursor: pointer; display: flex; align-items: center; justify-content: center;
+      transition: background 0.15s;
+    }
+    .viewer-nav button:hover { background: rgba(255,255,255,0.2); }
+    .viewer-nav button:disabled { opacity: 0.3; cursor: default; }
+    .viewer-counter { font-size: 12px; color: rgba(255,255,255,0.5); white-space: nowrap; }
+
+    #psv-container { flex: 1; width: 100%; }
+
+    .thumb-loading {
+      width: 100%; height: var(--thumb-h); background: var(--surface2);
+      display: flex; align-items: center; justify-content: center;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .spinner {
+      width: 20px; height: 20px;
+      border: 2px solid var(--border2); border-top-color: var(--accent);
+      border-radius: 50%; animation: spin 0.7s linear infinite;
+    }
+
+    #empty-filter { display: none; flex-direction: column; align-items: center; gap: 8px; padding: 80px 0; text-align: center; color: var(--muted); }
+    #empty-filter.show { display: flex; }
+    #empty-filter span { font-size: 32px; }
+  </style>
+</head>
+<body>
+
+<header>
+  <div class="logo">360° <span>Gallery</span></div>
+  <div class="header-controls">
+    <span class="item-count" id="item-count"></span>
+    <div class="filter-group">
+      <button class="filter-btn active" data-filter="all">All</button>
+      <button class="filter-btn" data-filter="photo">Photos</button>
+      <button class="filter-btn" data-filter="video">Videos</button>
+    </div>
+    <select class="sort-select" id="sort-select">
+      <option value="name-asc">Name A–Z</option>
+      <option value="name-desc">Name Z–A</option>
+      <option value="date-desc">Newest first</option>
+      <option value="date-asc">Oldest first</option>
+      <option value="type">Type</option>
+    </select>
+    <button class="import-btn" id="import-btn">＋ Add media</button>
+    <input type="file" id="file-input" accept="image/jpeg,image/png,image/webp,video/mp4,video/webm" multiple>
+  </div>
+</header>
+
+<main>
+  <div id="drop-zone">
+    <div class="drop-ring">🌐</div>
+    <h2>Your 360° gallery</h2>
+    <p>Drop <em>equirectangular photos or videos</em> anywhere, or click <em>Add media</em> to browse.</p>
+    <button class="import-btn" onclick="document.getElementById('file-input').click()">Add media</button>
+  </div>
+  <div id="gallery" class="hidden"></div>
+  <div id="empty-filter">
+    <span>🔍</span>
+    <p>No items match this filter.</p>
+  </div>
+</main>
+
+<div id="viewer-overlay">
+  <div class="viewer-header">
+    <button class="viewer-close" id="viewer-close" title="Close (Esc)">✕</button>
+    <div class="viewer-title" id="viewer-title"></div>
+    <span class="viewer-counter" id="viewer-counter"></span>
+    <div class="viewer-nav">
+      <button id="nav-prev" title="Previous (←)">‹</button>
+      <button id="nav-next" title="Next (→)">›</button>
+    </div>
+  </div>
+  <div id="psv-container"></div>
+</div>
+
+<script type="module">
+  import { Viewer, Cache }               from '@photo-sphere-viewer/core';
+  import { EquirectangularVideoAdapter } from '@photo-sphere-viewer/equirectangular-video-adapter';
+  import { VideoPlugin }                 from '@photo-sphere-viewer/video-plugin';
+  import { AutorotatePlugin }            from '@photo-sphere-viewer/autorotate-plugin';
+
+  let allItems      = [];
+  let filteredItems = [];
+  let activeFilter  = 'all';
+  let activeSort    = 'name-asc';
+  let currentIndex  = -1;
+  let psvViewer     = null;
+  let currentBlobURL = null;
+
+  // Shared hidden video element for PSV (no crossOrigin — avoids blob URL safety check)
+  const hiddenVideo = document.createElement('video');
+  hiddenVideo.loop = hiddenVideo.playsInline = hiddenVideo.muted = true;
+  hiddenVideo.preload = 'auto';
+  hiddenVideo.style.display = 'none';
+  document.body.appendChild(hiddenVideo);
+
+  // ── Thumbnail generation ──────────────────────────────────────────
+  // Centre-crop the equirectangular: [33%→66% width, 25%→75% height]
+  // This gives the "looking straight ahead" view with minimal distortion.
+
+  function cropToThumb(source, sx, sy, sw, sh) {
+    const canvas = document.createElement('canvas');
+    canvas.width  = 480;
+    canvas.height = Math.round(480 * sh / sw);
+    canvas.getContext('2d').drawImage(source, sx, sy, sw, sh, 0, 0, canvas.width, canvas.height);
+    return canvas.toDataURL('image/jpeg', 0.75);
+  }
+
+  function generatePhotoThumb(file) {
+    return new Promise(resolve => {
+      const img = new Image();
+      const url = URL.createObjectURL(file);
+      img.onload = () => {
+        URL.revokeObjectURL(url);
+        const W = img.naturalWidth, H = img.naturalHeight;
+        try {
+          resolve(cropToThumb(img,
+            Math.floor(W * 0.33), Math.floor(H * 0.25),
+            Math.floor(W * 0.34), Math.floor(H * 0.50)
+          ));
+        } catch { resolve(null); }
+      };
+      img.onerror = () => { URL.revokeObjectURL(url); resolve(null); };
+      img.src = url;
+    });
+  }
+
+  function generateVideoThumb(file) {
+    return new Promise(resolve => {
+      const video = document.createElement('video');
+      video.muted = true;
+      video.playsInline = true;
+      video.preload = 'auto';
+      // No crossOrigin — blob URLs must not have crossOrigin set
+      const url = URL.createObjectURL(file);
+
+      const cleanup = () => {
+        URL.revokeObjectURL(url);
+        video.src = '';
+        video.load();
+      };
+
+      video.addEventListener('error', () => { cleanup(); resolve(null); }, { once: true });
+
+      // Wait for enough data that a frame is actually decodable, then seek
+      video.addEventListener('loadeddata', () => {
+        // Seek to 1 second (or 10% of duration, whichever is less) for a representative frame
+        const target = Math.min(1, (video.duration || 2) * 0.1);
+        video.currentTime = isFinite(target) ? target : 0.5;
+      }, { once: true });
+
+      video.addEventListener('seeked', () => {
+        try {
+          const W = video.videoWidth, H = video.videoHeight;
+          if (!W || !H) { cleanup(); resolve(null); return; }
+          const dataURL = cropToThumb(video,
+            Math.floor(W * 0.33), Math.floor(H * 0.25),
+            Math.floor(W * 0.34), Math.floor(H * 0.50)
+          );
+          cleanup();
+          resolve(dataURL);
+        } catch { cleanup(); resolve(null); }
+      }, { once: true });
+
+      video.src = url;
+      video.load();
+    });
+  }
+
+  async function generateThumb(item) {
+    return item.type === 'video'
+      ? generateVideoThumb(item.file)
+      : generatePhotoThumb(item.file);
+  }
+
+  // ── Import ────────────────────────────────────────────────────────
+  async function importFiles(files) {
+    const valid = ['image/jpeg','image/png','image/webp','video/mp4','video/webm'];
+    const toAdd = Array.from(files).filter(f =>
+      valid.includes(f.type) && !allItems.find(i => i.name === f.name)
+    );
+    if (!toAdd.length) return;
+
+    document.getElementById('drop-zone').classList.add('hidden');
+    document.getElementById('gallery').classList.remove('hidden');
+
+    for (const file of toAdd) {
+      const item = {
+        file,
+        name:      file.name,
+        type:      file.type.startsWith('video/') ? 'video' : 'photo',
+        thumbURL:  null,
+        dateAdded: Date.now(),
+      };
+      allItems.push(item);
+      const card = createCard(item);
+
+      // Generate thumbnail async — card shows spinner until ready
+      generateThumb(item).then(dataURL => {
+        item.thumbURL = dataURL;
+        swapThumb(card, item);
+      });
+    }
+
+    applyFilterAndSort();
+    updateCount();
+  }
+
+  // ── Card DOM ──────────────────────────────────────────────────────
+  function createCard(item) {
+    const gallery = document.getElementById('gallery');
+    const card = document.createElement('div');
+    card.className = 'card';
+    card.dataset.name = item.name;
+    card.innerHTML = `
+      <div class="thumb-loading"><div class="spinner"></div></div>
+      <div class="card-overlay">${item.type === 'video' ? '▶' : '⊙'}</div>
+      <div class="card-body">
+        <div class="card-badges">
+          <span class="badge badge-${item.type}">${item.type}</span>
+        </div>
+        <div class="card-name" title="${item.name}">${item.name}</div>
+        <div class="card-meta">${formatSize(item.file.size)}</div>
+      </div>`;
+    card.addEventListener('click', () => openViewer(item.name));
+    gallery.appendChild(card);
+    return card;
+  }
+
+  function swapThumb(card, item) {
+    const placeholder = card.querySelector('.thumb-loading');
+    if (!placeholder) return;
+    if (item.thumbURL) {
+      const img = document.createElement('img');
+      img.className = 'card-thumb';
+      img.src  = item.thumbURL;
+      img.alt  = item.name;
+      placeholder.replaceWith(img);
+    } else {
+      const div = document.createElement('div');
+      div.className = 'card-thumb-placeholder';
+      div.textContent = item.type === 'video' ? '🎬' : '🌐';
+      placeholder.replaceWith(div);
+    }
+  }
+
+  function formatSize(b) {
+    return b < 1024 * 1024
+      ? (b / 1024).toFixed(1) + ' KB'
+      : (b / 1024 / 1024).toFixed(1) + ' MB';
+  }
+
+  // ── Filter & sort ─────────────────────────────────────────────────
+  function applyFilterAndSort() {
+    let items = [...allItems];
+    if (activeFilter !== 'all') items = items.filter(i => i.type === activeFilter);
+
+    items.sort((a, b) => {
+      switch (activeSort) {
+        case 'name-asc':  return a.name.localeCompare(b.name);
+        case 'name-desc': return b.name.localeCompare(a.name);
+        case 'date-desc': return b.dateAdded - a.dateAdded;
+        case 'date-asc':  return a.dateAdded - b.dateAdded;
+        case 'type':      return a.type.localeCompare(b.type) || a.name.localeCompare(b.name);
+        default:          return 0;
+      }
+    });
+
+    filteredItems = items;
+
+    const gallery = document.getElementById('gallery');
+    filteredItems.forEach(item => {
+      const card = gallery.querySelector(`[data-name="${CSS.escape(item.name)}"]`);
+      if (card) gallery.appendChild(card);
+    });
+
+    gallery.querySelectorAll('.card').forEach(card => {
+      const inFilter = filteredItems.find(i => i.name === card.dataset.name);
+      card.style.display = inFilter ? '' : 'none';
+    });
+
+    document.getElementById('empty-filter').classList.toggle(
+      'show', filteredItems.length === 0 && allItems.length > 0
+    );
+
+    updateCount();
+  }
+
+  function updateCount() {
+    const el    = document.getElementById('item-count');
+    const shown = filteredItems.length;
+    const total = allItems.length;
+    el.textContent = total === 0 ? ''
+      : shown === total ? `${total} item${total !== 1 ? 's' : ''}`
+      : `${shown} of ${total}`;
+  }
+
+  document.querySelectorAll('.filter-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      activeFilter = btn.dataset.filter;
+      applyFilterAndSort();
+    });
+  });
+
+  document.getElementById('sort-select').addEventListener('change', e => {
+    activeSort = e.target.value;
+    applyFilterAndSort();
+  });
+
+  // ── File import controls ──────────────────────────────────────────
+  document.getElementById('import-btn').addEventListener('click', () =>
+    document.getElementById('file-input').click()
+  );
+  document.getElementById('file-input').addEventListener('change', e => {
+    importFiles(e.target.files);
+    e.target.value = '';
+  });
+
+  document.body.addEventListener('dragover', e => {
+    e.preventDefault();
+    document.body.classList.add('dragging-over');
+  });
+  document.body.addEventListener('dragleave', e => {
+    if (!e.relatedTarget) document.body.classList.remove('dragging-over');
+  });
+  document.body.addEventListener('drop', e => {
+    e.preventDefault();
+    document.body.classList.remove('dragging-over');
+    importFiles(e.dataTransfer.files);
+  });
+
+  // ── Viewer ────────────────────────────────────────────────────────
+  function openViewer(name) {
+    const idx = filteredItems.findIndex(i => i.name === name);
+    if (idx === -1) return;
+    currentIndex = idx;
+    renderViewer(filteredItems[idx]);
+    document.getElementById('viewer-overlay').classList.add('open');
+    document.body.style.overflow = 'hidden';
+  }
+
+  function closeViewer() {
+    document.getElementById('viewer-overlay').classList.remove('open');
+    document.body.style.overflow = '';
+    destroyViewer();
+    currentIndex = -1;
+  }
+
+  function navTo(delta) {
+    const next = currentIndex + delta;
+    if (next < 0 || next >= filteredItems.length) return;
+    destroyViewer();
+    currentIndex = next;
+    renderViewer(filteredItems[currentIndex]);
+  }
+
+  function renderViewer(item) {
+    document.getElementById('viewer-title').textContent   = item.name;
+    document.getElementById('viewer-counter').textContent =
+      `${currentIndex + 1} / ${filteredItems.length}`;
+    document.getElementById('nav-prev').disabled = currentIndex === 0;
+    document.getElementById('nav-next').disabled = currentIndex === filteredItems.length - 1;
+
+    item.type === 'video' ? loadVideo(item) : loadPhoto(item);
+  }
+
+  function destroyViewer() {
+    if (psvViewer) {
+      try { psvViewer.destroy(); } catch (_) {}
+      psvViewer = null;
+    }
+    document.getElementById('psv-container').innerHTML = '';
+    hiddenVideo.pause();
+    hiddenVideo.removeAttribute('src');
+    hiddenVideo.load();
+    if (currentBlobURL) { URL.revokeObjectURL(currentBlobURL); currentBlobURL = null; }
+  }
+
+  function loadPhoto(item) {
+    const key = 'psv-photo-' + item.name;
+    Cache.add(key, key, item.file);
+    psvViewer = new Viewer({
+      container: document.getElementById('psv-container'),
+      panorama:  key,
+      navbar:    ['autorotate', 'zoom', 'move', 'fullscreen'],
+      plugins:   [AutorotatePlugin],
+    });
+  }
+
+  function loadVideo(item) {
+    // Create a fresh blob URL each time — the hidden video has no crossOrigin attribute
+    currentBlobURL = URL.createObjectURL(item.file);
+    hiddenVideo.src = currentBlobURL;
+    // hiddenVideo is created muted (needed for thumbnail generation); unmute here
+    // so the viewer opens with sound. Browser autoplay policy may override this,
+    // but the user can unmute via the volume button in the PSV navbar.
+    hiddenVideo.muted = false;
+
+    psvViewer = new Viewer({
+      container: document.getElementById('psv-container'),
+      adapter:   [EquirectangularVideoAdapter, { autoplay: true, muted: false }],
+      panorama:  { source: hiddenVideo },
+      // navbar includes 'caption' which VideoPlugin replaces with play + volume buttons
+      navbar:    ['autorotate', 'zoom', 'move', 'videoPlay', 'videoVolume', 'videoTime', 'fullscreen'],
+      plugins:   [
+        AutorotatePlugin,
+        [VideoPlugin, { autoplay: true, muted: false }],
+      ],
+    });
+  }
+
+  // ── Keyboard & swipe ──────────────────────────────────────────────
+  document.getElementById('viewer-close').addEventListener('click', closeViewer);
+  document.getElementById('nav-prev').addEventListener('click', () => navTo(-1));
+  document.getElementById('nav-next').addEventListener('click', () => navTo(1));
+
+  document.addEventListener('keydown', e => {
+    if (!document.getElementById('viewer-overlay').classList.contains('open')) return;
+    if (e.key === 'Escape')     closeViewer();
+    if (e.key === 'ArrowLeft')  navTo(-1);
+    if (e.key === 'ArrowRight') navTo(1);
+  });
+
+  let touchStartX = 0;
+  document.getElementById('psv-container').addEventListener('touchstart',
+    e => { touchStartX = e.touches[0].clientX; }, { passive: true });
+  document.getElementById('psv-container').addEventListener('touchend',
+    e => { if (Math.abs(e.changedTouches[0].clientX - touchStartX) > 60) navTo(e.changedTouches[0].clientX < touchStartX ? 1 : -1); },
+    { passive: true }
+  );
+</script>
+
+</body>
+</html>
