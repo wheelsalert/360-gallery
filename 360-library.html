@@ -1,0 +1,1264 @@
+<!DOCTYPE html>
+<!--
+  ============================================================
+  360° Library
+  ============================================================
+  Version  : 1.0.0
+  Date     : 2025-06-25
+  File     : 360-library.html
+
+  Changelog:
+  1.0.0 - Initial release
+        - Two-level navigation: albums grid → album contents
+        - Import via drag-and-drop folder or "Add folder" button
+        - File System Access API (Chrome/Edge) for full persistence
+          — browser remembers folder handles between sessions
+        - localStorage fallback (Safari/Firefox) — remembers album
+          structure and metadata, files re-imported on return
+        - "All media" view across all albums
+        - Centre-crop equirectangular thumbnails (photo + video)
+        - Video thumbnails: waits for loadeddata before seeking
+        - Fullscreen PSV viewer with prev/next navigation
+        - VideoPlugin with play/pause, volume/mute, time display
+        - AutorotatePlugin on all media
+        - Keyboard nav: Esc close, ← → prev/next
+        - Swipe nav on mobile
+        - Album item count and first-file cover thumbnail
+        - Per-album filter (all/photos/videos) and sort
+
+  Dependencies:
+        - three@0.184.0
+        - @photo-sphere-viewer/core@5.14.2
+        - @photo-sphere-viewer/equirectangular-video-adapter@5.14.2
+        - @photo-sphere-viewer/video-plugin@5.14.2
+        - @photo-sphere-viewer/autorotate-plugin@5.14.2
+  ============================================================
+-->
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>360° Library</title>
+
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@photo-sphere-viewer/core@5.14.2/index.min.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@photo-sphere-viewer/video-plugin@5.14.2/index.min.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@photo-sphere-viewer/autorotate-plugin@5.14.2/index.min.css">
+
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://cdn.jsdelivr.net/npm/three@0.184.0/build/three.module.js",
+      "@photo-sphere-viewer/core":                          "https://cdn.jsdelivr.net/npm/@photo-sphere-viewer/core@5.14.2/index.module.js",
+      "@photo-sphere-viewer/equirectangular-video-adapter": "https://cdn.jsdelivr.net/npm/@photo-sphere-viewer/equirectangular-video-adapter@5.14.2/index.module.js",
+      "@photo-sphere-viewer/video-plugin":                  "https://cdn.jsdelivr.net/npm/@photo-sphere-viewer/video-plugin@5.14.2/index.module.js",
+      "@photo-sphere-viewer/autorotate-plugin":             "https://cdn.jsdelivr.net/npm/@photo-sphere-viewer/autorotate-plugin@5.14.2/index.module.js"
+    }
+  }
+  </script>
+
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:         #0a0a0a;
+      --surface:    #141414;
+      --surface2:   #1e1e1e;
+      --border:     rgba(255,255,255,0.08);
+      --border2:    rgba(255,255,255,0.14);
+      --text:       #e8e8e8;
+      --muted:      #666;
+      --accent:     #5b8dee;
+      --accent-dim: #1e2d4a;
+      --amber:      #f5a623;
+      --amber-dim:  #2d2010;
+      --radius:     10px;
+      --thumb-h:    180px;
+      --album-h:    200px;
+    }
+
+    html, body {
+      height: 100%;
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      font-size: 14px;
+      line-height: 1.5;
+      overflow-x: hidden;
+    }
+
+    /* ── Header ── */
+    header {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 14px 24px;
+      border-bottom: 1px solid var(--border);
+      position: sticky;
+      top: 0;
+      background: rgba(10,10,10,0.92);
+      backdrop-filter: blur(12px);
+      z-index: 50;
+      flex-wrap: wrap;
+    }
+
+    .logo { font-size: 16px; font-weight: 600; color: #fff; flex-shrink: 0; }
+    .logo span { color: var(--accent); }
+
+    /* Breadcrumb */
+    .breadcrumb {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 13px;
+      color: var(--muted);
+      flex: 1;
+      min-width: 0;
+    }
+    .breadcrumb-sep { opacity: 0.4; }
+    .breadcrumb-link {
+      color: var(--accent);
+      cursor: pointer;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .breadcrumb-link:hover { text-decoration: underline; }
+    .breadcrumb-current {
+      color: var(--text);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .header-right {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+      margin-left: auto;
+    }
+
+    .item-count { font-size: 12px; color: var(--muted); white-space: nowrap; }
+
+    /* Filter + sort — only visible inside an album or all-media */
+    .filter-group {
+      display: flex;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      overflow: hidden;
+    }
+    .filter-btn {
+      background: none; border: none; color: var(--muted);
+      padding: 6px 12px; font-size: 13px; cursor: pointer;
+      transition: color 0.15s, background 0.15s;
+    }
+    .filter-btn:hover { color: var(--text); background: var(--surface2); }
+    .filter-btn.active { color: #fff; background: var(--accent-dim); }
+
+    .sort-select {
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: var(--radius); color: var(--text);
+      padding: 6px 10px; font-size: 13px; cursor: pointer; outline: none;
+    }
+    .sort-select:focus { border-color: var(--accent); }
+
+    .btn {
+      display: flex; align-items: center; gap: 6px;
+      padding: 6px 14px; border: none; border-radius: var(--radius);
+      font-size: 13px; font-weight: 500; cursor: pointer;
+      transition: opacity 0.15s;
+    }
+    .btn:hover { opacity: 0.85; }
+    .btn-primary { background: var(--accent); color: #fff; }
+    .btn-secondary { background: var(--surface); color: var(--text); border: 1px solid var(--border); }
+    .btn-secondary:hover { border-color: var(--border2); }
+
+    #folder-input { display: none; }
+
+    /* ── Main ── */
+    main { padding: 24px; min-height: calc(100vh - 57px); }
+
+    /* ── Empty / drop state ── */
+    #empty-state {
+      display: flex; flex-direction: column; align-items: center;
+      justify-content: center; gap: 16px;
+      min-height: calc(100vh - 140px); text-align: center;
+    }
+    #empty-state.hidden { display: none; }
+
+    .drop-ring {
+      width: 120px; height: 120px;
+      border: 2px dashed var(--border2); border-radius: 50%;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 40px; transition: border-color 0.2s, background 0.2s;
+    }
+    body.dragging-over .drop-ring { border-color: var(--accent); background: var(--accent-dim); }
+    #empty-state h2 { font-size: 20px; font-weight: 600; color: #fff; }
+    #empty-state p  { font-size: 13px; color: var(--muted); max-width: 340px; line-height: 1.7; }
+    #empty-state em { color: var(--accent); font-style: normal; }
+
+    /* Persistence notice */
+    .persist-notice {
+      font-size: 12px;
+      padding: 8px 14px;
+      border-radius: var(--radius);
+      border: 1px solid var(--border);
+      color: var(--muted);
+      max-width: 380px;
+    }
+    .persist-notice.has-fsa {
+      border-color: rgba(91,141,238,0.3);
+      background: var(--accent-dim);
+      color: #7aa3f0;
+    }
+
+    /* ── Albums grid ── */
+    #albums-view { display: none; }
+    #albums-view.active { display: block; }
+
+    .section-title {
+      font-size: 13px;
+      font-weight: 500;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.6px;
+      margin-bottom: 16px;
+    }
+
+    .albums-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+      gap: 16px;
+      margin-bottom: 32px;
+    }
+
+    .album-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      overflow: hidden;
+      cursor: pointer;
+      transition: border-color 0.15s, transform 0.15s;
+      position: relative;
+    }
+    .album-card:hover { border-color: var(--border2); transform: translateY(-2px); }
+
+    .album-cover {
+      width: 100%; height: var(--album-h);
+      object-fit: cover; display: block; background: var(--surface2);
+    }
+    .album-cover-placeholder {
+      width: 100%; height: var(--album-h);
+      background: var(--surface2);
+      display: flex; align-items: center; justify-content: center;
+      font-size: 40px; color: var(--muted);
+    }
+    .album-body { padding: 10px 12px 12px; }
+    .album-name {
+      font-size: 14px; font-weight: 500; color: #fff;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+      margin-bottom: 4px;
+    }
+    .album-meta { font-size: 12px; color: var(--muted); }
+
+    /* All media button row */
+    .all-media-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 16px;
+    }
+    .all-media-btn {
+      display: flex; align-items: center; gap: 8px;
+      padding: 10px 16px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      color: var(--text);
+      cursor: pointer;
+      font-size: 13px;
+      font-weight: 500;
+      transition: border-color 0.15s, background 0.15s;
+      width: 100%;
+      margin-bottom: 24px;
+    }
+    .all-media-btn:hover { border-color: var(--border2); background: var(--surface2); }
+    .all-media-btn .all-count { margin-left: auto; color: var(--muted); font-size: 12px; }
+
+    /* ── Media grid (inside album or all-media) ── */
+    #media-view { display: none; }
+    #media-view.active { display: block; }
+
+    .media-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+      gap: 16px;
+    }
+
+    .media-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      overflow: hidden;
+      cursor: pointer;
+      transition: border-color 0.15s, transform 0.15s;
+      position: relative;
+    }
+    .media-card:hover { border-color: var(--border2); transform: translateY(-2px); }
+    .media-card:hover .card-overlay { opacity: 1; }
+
+    .card-thumb {
+      width: 100%; height: var(--thumb-h);
+      object-fit: cover; display: block; background: var(--surface2);
+    }
+    .card-thumb-placeholder {
+      width: 100%; height: var(--thumb-h);
+      background: var(--surface2);
+      display: flex; align-items: center; justify-content: center;
+      font-size: 32px; color: var(--muted);
+    }
+    .card-overlay {
+      position: absolute; inset: 0 0 auto 0; height: var(--thumb-h);
+      background: rgba(0,0,0,0.3);
+      display: flex; align-items: center; justify-content: center;
+      opacity: 0; transition: opacity 0.2s; font-size: 36px;
+    }
+    .card-body { padding: 10px 12px 12px; }
+    .card-badges { display: flex; gap: 6px; margin-bottom: 6px; flex-wrap: wrap; }
+    .badge {
+      font-size: 10px; font-weight: 600; letter-spacing: 0.4px;
+      text-transform: uppercase; padding: 2px 7px; border-radius: 4px;
+    }
+    .badge-photo { background: rgba(91,141,238,0.15); color: #7aa3f0; }
+    .badge-video { background: rgba(255,165,50,0.15); color: #ffa832; }
+    .badge-album { background: rgba(245,166,35,0.15); color: #f5c96a; }
+    .card-name {
+      font-size: 13px; font-weight: 500; color: var(--text);
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-bottom: 2px;
+    }
+    .card-meta { font-size: 11px; color: var(--muted); }
+
+    /* Loading spinner */
+    .thumb-loading {
+      width: 100%; height: var(--thumb-h);
+      background: var(--surface2);
+      display: flex; align-items: center; justify-content: center;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .spinner {
+      width: 20px; height: 20px;
+      border: 2px solid var(--border2); border-top-color: var(--accent);
+      border-radius: 50%; animation: spin 0.7s linear infinite;
+    }
+
+    /* Empty filter */
+    #empty-filter {
+      display: none; flex-direction: column; align-items: center;
+      gap: 8px; padding: 80px 0; text-align: center; color: var(--muted);
+    }
+    #empty-filter.show { display: flex; }
+    #empty-filter span { font-size: 32px; }
+
+    /* ── Fullscreen viewer ── */
+    #viewer-overlay {
+      position: fixed; inset: 0; background: #000; z-index: 100;
+      display: none; flex-direction: column;
+    }
+    #viewer-overlay.open { display: flex; }
+
+    .viewer-header {
+      display: flex; align-items: center; gap: 12px;
+      padding: 12px 16px; background: rgba(0,0,0,0.6);
+      position: absolute; top: 0; left: 0; right: 0; z-index: 10;
+    }
+    .viewer-close {
+      background: rgba(255,255,255,0.1); border: none; color: #fff;
+      width: 36px; height: 36px; border-radius: 8px; font-size: 18px;
+      cursor: pointer; display: flex; align-items: center; justify-content: center;
+      transition: background 0.15s; flex-shrink: 0;
+    }
+    .viewer-close:hover { background: rgba(255,255,255,0.2); }
+
+    .viewer-info { flex: 1; min-width: 0; }
+    .viewer-title {
+      font-size: 14px; font-weight: 500; color: #fff;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .viewer-album { font-size: 11px; color: rgba(255,255,255,0.4); margin-top: 1px; }
+
+    .viewer-nav { display: flex; gap: 6px; align-items: center; }
+    .viewer-counter { font-size: 12px; color: rgba(255,255,255,0.4); white-space: nowrap; }
+    .viewer-nav button {
+      background: rgba(255,255,255,0.1); border: none; color: #fff;
+      width: 36px; height: 36px; border-radius: 8px; font-size: 18px;
+      cursor: pointer; display: flex; align-items: center; justify-content: center;
+      transition: background 0.15s;
+    }
+    .viewer-nav button:hover { background: rgba(255,255,255,0.2); }
+    .viewer-nav button:disabled { opacity: 0.3; cursor: default; }
+
+    #psv-container { flex: 1; width: 100%; }
+  </style>
+</head>
+<body>
+
+<header>
+  <div class="logo">360° <span>Library</span></div>
+
+  <div class="breadcrumb" id="breadcrumb">
+    <!-- populated by JS -->
+  </div>
+
+  <div class="header-right" id="header-right">
+    <span class="item-count" id="item-count"></span>
+    <div class="filter-group" id="filter-group" style="display:none">
+      <button class="filter-btn active" data-filter="all">All</button>
+      <button class="filter-btn" data-filter="photo">Photos</button>
+      <button class="filter-btn" data-filter="video">Videos</button>
+    </div>
+    <select class="sort-select" id="sort-select" style="display:none">
+      <option value="name-asc">Name A–Z</option>
+      <option value="name-desc">Name Z–A</option>
+      <option value="type">Type</option>
+    </select>
+    <button class="btn btn-secondary" id="add-folder-btn">＋ Add folder</button>
+    <input type="file" id="folder-input" webkitdirectory multiple
+      accept="image/jpeg,image/png,image/webp,video/mp4,video/webm">
+  </div>
+</header>
+
+<main>
+
+  <!-- Empty / drop state -->
+  <div id="empty-state">
+    <div class="drop-ring">📁</div>
+    <h2>Your 360° library</h2>
+    <p>
+      Drop a <em>folder</em> anywhere on this page,<br>
+      or click <em>Add folder</em> to browse.<br><br>
+      Each folder becomes an album — name it something meaningful,<br>
+      like <em>2025-05-05 NYC Trip</em>.
+    </p>
+    <button class="btn btn-primary" id="empty-add-btn">Add folder</button>
+    <div class="persist-notice" id="persist-notice"></div>
+  </div>
+
+  <!-- Albums view -->
+  <div id="albums-view">
+    <button class="all-media-btn" id="all-media-btn">
+      <span>🌐</span>
+      <span>All media</span>
+      <span class="all-count" id="all-count"></span>
+    </button>
+    <div class="section-title">Albums</div>
+    <div class="albums-grid" id="albums-grid"></div>
+  </div>
+
+  <!-- Media view (inside album or all-media) -->
+  <div id="media-view">
+    <div class="media-grid" id="media-grid"></div>
+    <div id="empty-filter">
+      <span>🔍</span>
+      <p>No items match this filter.</p>
+    </div>
+  </div>
+
+</main>
+
+<!-- Fullscreen viewer -->
+<div id="viewer-overlay">
+  <div class="viewer-header">
+    <button class="viewer-close" id="viewer-close" title="Close (Esc)">✕</button>
+    <div class="viewer-info">
+      <div class="viewer-title" id="viewer-title"></div>
+      <div class="viewer-album" id="viewer-album"></div>
+    </div>
+    <div class="viewer-nav">
+      <span class="viewer-counter" id="viewer-counter"></span>
+      <button id="nav-prev" title="Previous (←)">‹</button>
+      <button id="nav-next" title="Next (→)">›</button>
+    </div>
+  </div>
+  <div id="psv-container"></div>
+</div>
+
+<video id="hidden-video" loop playsinline muted preload="auto" style="display:none"></video>
+
+<script type="module">
+  import { Viewer, Cache }               from '@photo-sphere-viewer/core';
+  import { EquirectangularVideoAdapter } from '@photo-sphere-viewer/equirectangular-video-adapter';
+  import { VideoPlugin }                 from '@photo-sphere-viewer/video-plugin';
+  import { AutorotatePlugin }            from '@photo-sphere-viewer/autorotate-plugin';
+
+  // ── Feature detection ─────────────────────────────────────────────
+  const HAS_FSA = 'showDirectoryPicker' in window;
+
+  // ── State ─────────────────────────────────────────────────────────
+  // albums: [{ id, name, items: [{ file, name, type, thumbURL, dateAdded }], coverURL, handle? }]
+  let albums       = [];
+  let currentView  = 'empty';   // 'empty' | 'albums' | 'album' | 'all'
+  let currentAlbum = null;      // album object when in album view
+  let viewItems    = [];        // items currently shown in media grid
+  let filteredItems = [];
+  let activeFilter = 'all';
+  let activeSort   = 'name-asc';
+  let currentIndex = -1;
+  let psvViewer    = null;
+  let currentBlobURL = null;
+  const hiddenVideo  = document.getElementById('hidden-video');
+
+  // ── Persistence ───────────────────────────────────────────────────
+  const LS_KEY = 'psv-library-v1';
+
+  function saveToStorage() {
+    // Save album metadata only — not file blobs (too large)
+    const data = albums.map(a => ({
+      id:        a.id,
+      name:      a.name,
+      coverURL:  a.coverURL || null,
+      itemCount: a.items.length,
+      items:     a.items.map(i => ({
+        name:      i.name,
+        type:      i.type,
+        size:      i.file?.size || i.size || 0,
+        thumbURL:  i.thumbURL || null,
+        dateAdded: i.dateAdded,
+      })),
+    }));
+    try { localStorage.setItem(LS_KEY, JSON.stringify(data)); } catch (_) {}
+  }
+
+  function loadFromStorage() {
+    try {
+      const raw = localStorage.getItem(LS_KEY);
+      if (!raw) return [];
+      return JSON.parse(raw);
+    } catch { return []; }
+  }
+
+  // ── FSA: re-open saved folder handles ────────────────────────────
+  // Chrome/Edge: we store directory handles in IndexedDB via a simple wrapper
+  const IDB_NAME = 'psv-library-handles';
+  const IDB_STORE = 'handles';
+
+  function openIDB() {
+    return new Promise((resolve, reject) => {
+      const req = indexedDB.open(IDB_NAME, 1);
+      req.onupgradeneeded = e => e.target.result.createObjectStore(IDB_STORE);
+      req.onsuccess = e => resolve(e.target.result);
+      req.onerror   = () => reject(req.error);
+    });
+  }
+
+  async function saveHandle(albumId, handle) {
+    if (!HAS_FSA) return;
+    try {
+      const db = await openIDB();
+      const tx = db.transaction(IDB_STORE, 'readwrite');
+      tx.objectStore(IDB_STORE).put(handle, albumId);
+    } catch (_) {}
+  }
+
+  async function loadHandle(albumId) {
+    if (!HAS_FSA) return null;
+    try {
+      const db = await openIDB();
+      return await new Promise((resolve, reject) => {
+        const tx  = db.transaction(IDB_STORE, 'readonly');
+        const req = tx.objectStore(IDB_STORE).get(albumId);
+        req.onsuccess = () => resolve(req.result || null);
+        req.onerror   = () => reject(req.error);
+      });
+    } catch { return null; }
+  }
+
+  async function deleteHandle(albumId) {
+    if (!HAS_FSA) return;
+    try {
+      const db = await openIDB();
+      const tx = db.transaction(IDB_STORE, 'readwrite');
+      tx.objectStore(IDB_STORE).delete(albumId);
+    } catch (_) {}
+  }
+
+  // ── Thumbnail generation ──────────────────────────────────────────
+  function cropToThumb(source, sx, sy, sw, sh) {
+    const canvas = document.createElement('canvas');
+    canvas.width  = 480;
+    canvas.height = Math.round(480 * sh / sw);
+    canvas.getContext('2d').drawImage(source, sx, sy, sw, sh, 0, 0, canvas.width, canvas.height);
+    return canvas.toDataURL('image/jpeg', 0.75);
+  }
+
+  function generatePhotoThumb(file) {
+    return new Promise(resolve => {
+      const img = new Image();
+      const url = URL.createObjectURL(file);
+      img.onload = () => {
+        URL.revokeObjectURL(url);
+        const W = img.naturalWidth, H = img.naturalHeight;
+        try {
+          resolve(cropToThumb(img,
+            Math.floor(W * 0.33), Math.floor(H * 0.25),
+            Math.floor(W * 0.34), Math.floor(H * 0.50)
+          ));
+        } catch { resolve(null); }
+      };
+      img.onerror = () => { URL.revokeObjectURL(url); resolve(null); };
+      img.src = url;
+    });
+  }
+
+  function generateVideoThumb(file) {
+    return new Promise(resolve => {
+      const video = document.createElement('video');
+      video.muted = true; video.playsInline = true; video.preload = 'auto';
+      const url = URL.createObjectURL(file);
+      const cleanup = () => { URL.revokeObjectURL(url); video.src = ''; video.load(); };
+      video.addEventListener('error', () => { cleanup(); resolve(null); }, { once: true });
+      video.addEventListener('loadeddata', () => {
+        video.currentTime = Math.min(1, (video.duration || 2) * 0.1);
+      }, { once: true });
+      video.addEventListener('seeked', () => {
+        try {
+          const W = video.videoWidth, H = video.videoHeight;
+          if (!W || !H) { cleanup(); resolve(null); return; }
+          const dataURL = cropToThumb(video,
+            Math.floor(W * 0.33), Math.floor(H * 0.25),
+            Math.floor(W * 0.34), Math.floor(H * 0.50)
+          );
+          cleanup(); resolve(dataURL);
+        } catch { cleanup(); resolve(null); }
+      }, { once: true });
+      video.src = url; video.load();
+    });
+  }
+
+  async function generateThumb(item) {
+    return item.type === 'video'
+      ? generateVideoThumb(item.file)
+      : generatePhotoThumb(item.file);
+  }
+
+  // ── File type helpers ─────────────────────────────────────────────
+  const VALID_TYPES = ['image/jpeg','image/png','image/webp','video/mp4','video/webm'];
+  const VALID_EXTS  = ['.jpg','.jpeg','.png','.webp','.mp4','.webm'];
+
+  function isValidFile(name, type) {
+    if (type && VALID_TYPES.includes(type)) return true;
+    const ext = name.toLowerCase().slice(name.lastIndexOf('.'));
+    return VALID_EXTS.includes(ext);
+  }
+
+  function fileType(name, mimeType) {
+    if (mimeType?.startsWith('video/')) return 'video';
+    const ext = name.toLowerCase().slice(name.lastIndexOf('.'));
+    return ['.mp4','.webm'].includes(ext) ? 'video' : 'photo';
+  }
+
+  function formatSize(b) {
+    return b < 1024*1024 ? (b/1024).toFixed(1)+' KB' : (b/1024/1024).toFixed(1)+' MB';
+  }
+
+  function genId() { return Date.now().toString(36) + Math.random().toString(36).slice(2); }
+
+  // ── Import: FSA folder picker ─────────────────────────────────────
+  async function pickFolderFSA() {
+    try {
+      const dirHandle = await window.showDirectoryPicker({ mode: 'read' });
+      await importFromDirHandle(dirHandle);
+    } catch (e) {
+      if (e.name !== 'AbortError') console.error('FSA error:', e);
+    }
+  }
+
+  async function importFromDirHandle(dirHandle, albumName) {
+    const name  = albumName || dirHandle.name;
+    const files = [];
+    for await (const entry of dirHandle.values()) {
+      if (entry.kind !== 'file') continue;
+      const file = await entry.getFile();
+      if (isValidFile(file.name, file.type)) files.push(file);
+    }
+    if (!files.length) return;
+    const album = await createAlbum(name, files);
+    await saveHandle(album.id, dirHandle);
+    renderAll();
+  }
+
+  // ── Import: webkitdirectory fallback ──────────────────────────────
+  async function importFromFileList(fileList) {
+    // Group by folder name (webkitRelativePath gives "folder/file.jpg")
+    const groups = {};
+    for (const file of fileList) {
+      if (!isValidFile(file.name, file.type)) continue;
+      const parts  = file.webkitRelativePath.split('/');
+      const folder = parts.length > 1 ? parts[0] : 'Unsorted';
+      if (!groups[folder]) groups[folder] = [];
+      groups[folder].push(file);
+    }
+    for (const [name, files] of Object.entries(groups)) {
+      await createAlbum(name, files);
+    }
+    renderAll();
+  }
+
+  // ── Create album ──────────────────────────────────────────────────
+  async function createAlbum(name, files) {
+    // Skip if album with same name already exists
+    let album = albums.find(a => a.name === name);
+    if (!album) {
+      album = { id: genId(), name, items: [], coverURL: null };
+      albums.push(album);
+    }
+
+    for (const file of files) {
+      if (album.items.find(i => i.name === file.name)) continue;
+      const item = {
+        file, name: file.name,
+        type: fileType(file.name, file.type),
+        size: file.size,
+        thumbURL: null,
+        dateAdded: file.lastModified || Date.now(),
+        albumId: album.id, albumName: album.name,
+      };
+      album.items.push(item);
+    }
+
+    // Generate thumbnails async
+    for (const item of album.items.filter(i => !i.thumbURL)) {
+      generateThumb(item).then(dataURL => {
+        item.thumbURL = dataURL;
+        if (!album.coverURL && dataURL) {
+          album.coverURL = dataURL;
+          updateAlbumCover(album);
+        }
+        updateMediaCardThumb(item);
+        saveToStorage();
+      });
+    }
+
+    if (!album.coverURL && album.items[0]?.thumbURL) {
+      album.coverURL = album.items[0].thumbURL;
+    }
+
+    saveToStorage();
+    return album;
+  }
+
+  // ── Render: top level ─────────────────────────────────────────────
+  function renderAll() {
+    if (!albums.length) {
+      showView('empty');
+      return;
+    }
+    showView('albums');
+    renderAlbumsGrid();
+    updateAllCount();
+  }
+
+  function showView(view) {
+    currentView = view;
+    document.getElementById('empty-state').classList.toggle('hidden', view !== 'empty');
+    document.getElementById('albums-view').classList.toggle('active', view === 'albums');
+    document.getElementById('media-view').classList.toggle('active', view === 'album' || view === 'all');
+
+    const showControls = view === 'album' || view === 'all';
+    document.getElementById('filter-group').style.display = showControls ? '' : 'none';
+    document.getElementById('sort-select').style.display  = showControls ? '' : 'none';
+
+    renderBreadcrumb();
+    updateCount();
+  }
+
+  // ── Breadcrumb ────────────────────────────────────────────────────
+  function renderBreadcrumb() {
+    const el = document.getElementById('breadcrumb');
+    if (currentView === 'empty' || currentView === 'albums') {
+      el.innerHTML = '';
+      return;
+    }
+    if (currentView === 'all') {
+      el.innerHTML = `
+        <span class="breadcrumb-link" id="bc-home">Library</span>
+        <span class="breadcrumb-sep">›</span>
+        <span class="breadcrumb-current">All media</span>`;
+    } else {
+      el.innerHTML = `
+        <span class="breadcrumb-link" id="bc-home">Library</span>
+        <span class="breadcrumb-sep">›</span>
+        <span class="breadcrumb-current">${currentAlbum?.name || ''}</span>`;
+    }
+    document.getElementById('bc-home')?.addEventListener('click', () => {
+      currentAlbum = null;
+      activeFilter = 'all';
+      document.querySelectorAll('.filter-btn').forEach(b =>
+        b.classList.toggle('active', b.dataset.filter === 'all')
+      );
+      showView('albums');
+    });
+  }
+
+  // ── Albums grid ───────────────────────────────────────────────────
+  function renderAlbumsGrid() {
+    const grid = document.getElementById('albums-grid');
+    grid.innerHTML = '';
+    albums.forEach(album => {
+      const card = document.createElement('div');
+      card.className = 'album-card';
+      card.dataset.albumId = album.id;
+      card.innerHTML = `
+        ${album.coverURL
+          ? `<img class="album-cover" src="${album.coverURL}" alt="${album.name}">`
+          : `<div class="album-cover-placeholder">📁</div>`}
+        <div class="album-body">
+          <div class="album-name" title="${album.name}">${album.name}</div>
+          <div class="album-meta">${album.items.length} item${album.items.length !== 1 ? 's' : ''}</div>
+        </div>`;
+      card.addEventListener('click', () => openAlbum(album));
+      grid.appendChild(card);
+    });
+  }
+
+  function updateAlbumCover(album) {
+    const card = document.querySelector(`.album-card[data-album-id="${album.id}"]`);
+    if (!card || !album.coverURL) return;
+    const existing = card.querySelector('.album-cover-placeholder');
+    if (existing) {
+      const img = document.createElement('img');
+      img.className = 'album-cover';
+      img.src = album.coverURL;
+      img.alt = album.name;
+      existing.replaceWith(img);
+    }
+  }
+
+  function updateAllCount() {
+    const total = albums.reduce((n, a) => n + a.items.length, 0);
+    document.getElementById('all-count').textContent =
+      `${total} item${total !== 1 ? 's' : ''}`;
+  }
+
+  // ── Open album / all media ────────────────────────────────────────
+  function openAlbum(album) {
+    currentAlbum = album;
+    viewItems = [...album.items];
+    activeFilter = 'all';
+    document.querySelectorAll('.filter-btn').forEach(b =>
+      b.classList.toggle('active', b.dataset.filter === 'all')
+    );
+    showView('album');
+    renderMediaGrid();
+  }
+
+  function openAllMedia() {
+    currentAlbum = null;
+    viewItems = albums.flatMap(a => a.items);
+    activeFilter = 'all';
+    document.querySelectorAll('.filter-btn').forEach(b =>
+      b.classList.toggle('active', b.dataset.filter === 'all')
+    );
+    showView('all');
+    renderMediaGrid();
+  }
+
+  // ── Media grid ────────────────────────────────────────────────────
+  function renderMediaGrid() {
+    const grid = document.getElementById('media-grid');
+    grid.innerHTML = '';
+    applyFilterAndSort();
+  }
+
+  function applyFilterAndSort() {
+    let items = [...viewItems];
+    if (activeFilter !== 'all') items = items.filter(i => i.type === activeFilter);
+
+    items.sort((a, b) => {
+      switch (activeSort) {
+        case 'name-asc':  return a.name.localeCompare(b.name);
+        case 'name-desc': return b.name.localeCompare(a.name);
+        case 'type':      return a.type.localeCompare(b.type) || a.name.localeCompare(b.name);
+        default:          return 0;
+      }
+    });
+
+    filteredItems = items;
+
+    const grid = document.getElementById('media-grid');
+
+    // Remove cards not in filtered set, add/reorder those that are
+    const existing = new Set([...grid.querySelectorAll('.media-card')].map(c => c.dataset.key));
+    const needed   = new Set(filteredItems.map(itemKey));
+
+    // Remove cards no longer needed
+    grid.querySelectorAll('.media-card').forEach(card => {
+      if (!needed.has(card.dataset.key)) card.remove();
+    });
+
+    // Add or reorder
+    filteredItems.forEach(item => {
+      const key  = itemKey(item);
+      let card   = grid.querySelector(`.media-card[data-key="${CSS.escape(key)}"]`);
+      if (!card) {
+        card = createMediaCard(item);
+        // Trigger thumb generation if not done yet
+        if (!item.thumbURL && item.file) {
+          generateThumb(item).then(dataURL => {
+            item.thumbURL = dataURL;
+            updateMediaCardThumb(item);
+            saveToStorage();
+          });
+        }
+      }
+      grid.appendChild(card); // move to end = correct order
+    });
+
+    document.getElementById('empty-filter').classList.toggle(
+      'show', filteredItems.length === 0 && viewItems.length > 0
+    );
+    updateCount();
+  }
+
+  function itemKey(item) {
+    return item.albumId + '/' + item.name;
+  }
+
+  function createMediaCard(item) {
+    const card = document.createElement('div');
+    card.className = 'media-card';
+    card.dataset.key = itemKey(item);
+
+    const showAlbumBadge = currentView === 'all';
+
+    card.innerHTML = `
+      ${item.thumbURL
+        ? `<img class="card-thumb" src="${item.thumbURL}" alt="${item.name}">`
+        : item.file
+          ? `<div class="thumb-loading"><div class="spinner"></div></div>`
+          : `<div class="card-thumb-placeholder">${item.type === 'video' ? '🎬' : '🌐'}</div>`
+      }
+      <div class="card-overlay">${item.type === 'video' ? '▶' : '⊙'}</div>
+      <div class="card-body">
+        <div class="card-badges">
+          <span class="badge badge-${item.type}">${item.type}</span>
+          ${showAlbumBadge ? `<span class="badge badge-album">${item.albumName}</span>` : ''}
+        </div>
+        <div class="card-name" title="${item.name}">${item.name}</div>
+        <div class="card-meta">${item.file ? formatSize(item.file.size) : formatSize(item.size || 0)}</div>
+      </div>`;
+
+    card.addEventListener('click', () => openViewer(item));
+    return card;
+  }
+
+  function updateMediaCardThumb(item) {
+    const key  = itemKey(item);
+    const card = document.querySelector(`.media-card[data-key="${CSS.escape(key)}"]`);
+    if (!card) return;
+    const placeholder = card.querySelector('.thumb-loading, .card-thumb-placeholder');
+    if (!placeholder) return;
+    if (item.thumbURL) {
+      const img = document.createElement('img');
+      img.className = 'card-thumb';
+      img.src = item.thumbURL;
+      img.alt = item.name;
+      placeholder.replaceWith(img);
+    } else {
+      const div = document.createElement('div');
+      div.className = 'card-thumb-placeholder';
+      div.textContent = item.type === 'video' ? '🎬' : '🌐';
+      placeholder.replaceWith(div);
+    }
+  }
+
+  function updateCount() {
+    const el = document.getElementById('item-count');
+    if (currentView === 'albums') {
+      el.textContent = `${albums.length} album${albums.length !== 1 ? 's' : ''}`;
+    } else if (currentView === 'album' || currentView === 'all') {
+      const shown = filteredItems.length, total = viewItems.length;
+      el.textContent = shown === total
+        ? `${total} item${total !== 1 ? 's' : ''}`
+        : `${shown} of ${total}`;
+    } else {
+      el.textContent = '';
+    }
+  }
+
+  // ── Filter & sort controls ────────────────────────────────────────
+  document.querySelectorAll('.filter-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      activeFilter = btn.dataset.filter;
+      applyFilterAndSort();
+    });
+  });
+
+  document.getElementById('sort-select').addEventListener('change', e => {
+    activeSort = e.target.value;
+    applyFilterAndSort();
+  });
+
+  // ── Import controls ───────────────────────────────────────────────
+  async function handleAddFolder() {
+    if (HAS_FSA) {
+      await pickFolderFSA();
+    } else {
+      document.getElementById('folder-input').click();
+    }
+  }
+
+  document.getElementById('add-folder-btn').addEventListener('click', handleAddFolder);
+  document.getElementById('empty-add-btn').addEventListener('click', handleAddFolder);
+
+  document.getElementById('folder-input').addEventListener('change', async e => {
+    await importFromFileList(e.target.files);
+    e.target.value = '';
+  });
+
+  document.getElementById('all-media-btn').addEventListener('click', openAllMedia);
+
+  // ── Drag & drop folder ────────────────────────────────────────────
+  document.body.addEventListener('dragover', e => {
+    e.preventDefault();
+    document.body.classList.add('dragging-over');
+  });
+  document.body.addEventListener('dragleave', e => {
+    if (!e.relatedTarget) document.body.classList.remove('dragging-over');
+  });
+  document.body.addEventListener('drop', async e => {
+    e.preventDefault();
+    document.body.classList.remove('dragging-over');
+
+    const items = [...e.dataTransfer.items];
+
+    if (HAS_FSA) {
+      // FSA path: get directory handles from drop
+      for (const item of items) {
+        if (item.kind !== 'file') continue;
+        try {
+          const handle = await item.getAsFileSystemHandle();
+          if (handle.kind === 'directory') {
+            await importFromDirHandle(handle);
+          } else {
+            // Single file dropped — add to Unsorted
+            const file = await handle.getFile();
+            if (isValidFile(file.name, file.type)) {
+              await createAlbum('Unsorted', [file]);
+              renderAll();
+            }
+          }
+        } catch (_) {}
+      }
+    } else {
+      // Fallback: use DataTransferItem.webkitGetAsEntry
+      const files = [];
+      const readEntry = entry => new Promise(resolve => {
+        if (entry.isFile) {
+          entry.file(file => { files.push(file); resolve(); }, resolve);
+        } else if (entry.isDirectory) {
+          const reader = entry.createReader();
+          reader.readEntries(async entries => {
+            for (const e of entries) await readEntry(e);
+            resolve();
+          }, resolve);
+        } else resolve();
+      });
+
+      for (const item of items) {
+        const entry = item.webkitGetAsEntry?.();
+        if (entry) await readEntry(entry);
+      }
+
+      if (files.length) await importFromFileList(files);
+    }
+  });
+
+  // ── Viewer ────────────────────────────────────────────────────────
+  function openViewer(item) {
+    currentIndex = filteredItems.findIndex(i => itemKey(i) === itemKey(item));
+    if (currentIndex === -1) return;
+    renderViewerItem(filteredItems[currentIndex]);
+    document.getElementById('viewer-overlay').classList.add('open');
+    document.body.style.overflow = 'hidden';
+  }
+
+  function closeViewer() {
+    document.getElementById('viewer-overlay').classList.remove('open');
+    document.body.style.overflow = '';
+    destroyPSV();
+    currentIndex = -1;
+  }
+
+  function navTo(delta) {
+    const next = currentIndex + delta;
+    if (next < 0 || next >= filteredItems.length) return;
+    destroyPSV();
+    currentIndex = next;
+    renderViewerItem(filteredItems[currentIndex]);
+  }
+
+  function renderViewerItem(item) {
+    document.getElementById('viewer-title').textContent  = item.name;
+    document.getElementById('viewer-album').textContent  = item.albumName || '';
+    document.getElementById('viewer-counter').textContent =
+      `${currentIndex + 1} / ${filteredItems.length}`;
+    document.getElementById('nav-prev').disabled = currentIndex === 0;
+    document.getElementById('nav-next').disabled = currentIndex === filteredItems.length - 1;
+
+    if (!item.file) {
+      showViewerError('File not loaded. Re-import the folder to view this item.');
+      return;
+    }
+
+    item.type === 'video' ? loadVideo(item) : loadPhoto(item);
+  }
+
+  function showViewerError(msg) {
+    document.getElementById('psv-container').innerHTML =
+      `<div style="display:flex;align-items:center;justify-content:center;height:100%;color:#666;font-size:14px;text-align:center;padding:24px;">${msg}</div>`;
+  }
+
+  function destroyPSV() {
+    if (psvViewer) { try { psvViewer.destroy(); } catch (_) {} psvViewer = null; }
+    document.getElementById('psv-container').innerHTML = '';
+    hiddenVideo.pause();
+    hiddenVideo.removeAttribute('src');
+    hiddenVideo.load();
+    if (currentBlobURL) { URL.revokeObjectURL(currentBlobURL); currentBlobURL = null; }
+  }
+
+  function loadPhoto(item) {
+    const key = 'psv-lib-' + itemKey(item);
+    Cache.add(key, key, item.file);
+    psvViewer = new Viewer({
+      container: document.getElementById('psv-container'),
+      panorama:  key,
+      navbar:    ['autorotate', 'zoom', 'move', 'fullscreen'],
+      plugins:   [AutorotatePlugin],
+    });
+    psvViewer.addEventListener('error', e =>
+      showViewerError('Could not load this photo: ' + (e.error?.message || 'unknown error'))
+    );
+  }
+
+  function loadVideo(item) {
+    currentBlobURL = URL.createObjectURL(item.file);
+    hiddenVideo.src = currentBlobURL;
+    hiddenVideo.muted = false;
+
+    hiddenVideo.addEventListener('error', () => {
+      const err = hiddenVideo.error;
+      showViewerError(`Video error ${err?.code || '?'}: ${err?.message || 'could not decode'}`);
+    }, { once: true });
+
+    psvViewer = new Viewer({
+      container: document.getElementById('psv-container'),
+      adapter:   [EquirectangularVideoAdapter, { autoplay: true, muted: false }],
+      panorama:  { source: hiddenVideo },
+      navbar:    ['autorotate', 'zoom', 'move', 'videoPlay', 'videoVolume', 'videoTime', 'fullscreen'],
+      plugins:   [AutorotatePlugin, [VideoPlugin, { autoplay: true, muted: false }]],
+    });
+  }
+
+  document.getElementById('viewer-close').addEventListener('click', closeViewer);
+  document.getElementById('nav-prev').addEventListener('click', () => navTo(-1));
+  document.getElementById('nav-next').addEventListener('click', () => navTo(1));
+
+  document.addEventListener('keydown', e => {
+    if (!document.getElementById('viewer-overlay').classList.contains('open')) return;
+    if (e.key === 'Escape')     closeViewer();
+    if (e.key === 'ArrowLeft')  navTo(-1);
+    if (e.key === 'ArrowRight') navTo(1);
+  });
+
+  let touchStartX = 0;
+  document.getElementById('psv-container').addEventListener('touchstart',
+    e => { touchStartX = e.touches[0].clientX; }, { passive: true });
+  document.getElementById('psv-container').addEventListener('touchend', e => {
+    const dx = e.changedTouches[0].clientX - touchStartX;
+    if (Math.abs(dx) > 60) navTo(dx < 0 ? 1 : -1);
+  }, { passive: true });
+
+  // ── Persistence notice ────────────────────────────────────────────
+  function showPersistNotice() {
+    const el = document.getElementById('persist-notice');
+    if (HAS_FSA) {
+      el.className = 'persist-notice has-fsa';
+      el.textContent = '✓ Full persistence enabled — your library reloads automatically on return visits.';
+    } else {
+      el.className = 'persist-notice';
+      el.textContent = 'Structure is saved between sessions. Re-import folders to view media on return visits. Use Chrome or Edge for full persistence.';
+    }
+  }
+
+  // ── Restore from storage on load ──────────────────────────────────
+  async function restoreLibrary() {
+    const saved = loadFromStorage();
+    if (!saved.length) return;
+
+    for (const savedAlbum of saved) {
+      const album = {
+        id:       savedAlbum.id,
+        name:     savedAlbum.name,
+        coverURL: savedAlbum.coverURL || null,
+        items:    savedAlbum.items.map(i => ({
+          ...i,
+          file: null, // file not persisted — restored via FSA handle below
+        })),
+      };
+      albums.push(album);
+
+      // Try to restore files via FSA handle
+      if (HAS_FSA) {
+        const handle = await loadHandle(album.id);
+        if (handle) {
+          try {
+            const perm = await handle.queryPermission({ mode: 'read' });
+            if (perm === 'granted') {
+              await reloadFilesFromHandle(album, handle);
+            } else {
+              const req = await handle.requestPermission({ mode: 'read' });
+              if (req === 'granted') await reloadFilesFromHandle(album, handle);
+            }
+          } catch (_) {}
+        }
+      }
+    }
+
+    if (albums.length) renderAll();
+  }
+
+  async function reloadFilesFromHandle(album, dirHandle) {
+    for await (const entry of dirHandle.values()) {
+      if (entry.kind !== 'file') continue;
+      const item = album.items.find(i => i.name === entry.name);
+      if (!item) continue;
+      try {
+        const file = await entry.getFile();
+        item.file = file;
+        item.size = file.size;
+        // Regenerate thumb if missing
+        if (!item.thumbURL) {
+          generateThumb(item).then(dataURL => {
+            item.thumbURL = dataURL;
+            if (!album.coverURL && dataURL) album.coverURL = dataURL;
+            updateMediaCardThumb(item);
+            updateAlbumCover(album);
+            saveToStorage();
+          });
+        }
+      } catch (_) {}
+    }
+  }
+
+  // ── Init ──────────────────────────────────────────────────────────
+  showPersistNotice();
+  await restoreLibrary();
+  if (!albums.length) showView('empty');
+</script>
+
+</body>
+</html>
