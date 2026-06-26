@@ -3,11 +3,23 @@
   ============================================================
   360° Library
   ============================================================
-  Version  : 1.0.2
-  Date     : 2025-06-25
+  Version  : 1.1.0
+  Date     : 2025-06-26
   File     : 360-library.html
 
   Changelog:
+  1.1.0 - Fix localStorage scaling for 100+ folder libraries
+        - Quota protection: catch QuotaExceededError, show dismissible
+          warning banner instead of silently failing
+        - Album-cover-only thumbnail storage: item thumbURLs are no longer
+          persisted to localStorage, only one coverURL per album is saved,
+          reducing storage from (albums × files × ~20 KB) to (albums × ~20 KB)
+        - Lazy thumbnail generation: IntersectionObserver generates thumbs
+          only when cards scroll into view (200 px lookahead), preventing
+          mass Canvas work on import and on page restore
+        - Removed saveToStorage() from FSA reload loop to prevent
+          re-inflating localStorage with per-item thumbs on return visits
+
   1.0.2 - Fix re-import not refreshing files on Safari
         - createAlbum() was skipping existing items on re-import
           leaving item.file = null after restore from localStorage
@@ -372,6 +384,36 @@
     #empty-filter.show { display: flex; }
     #empty-filter span { font-size: 32px; }
 
+    /* ── Quota warning banner ── */
+    #quota-banner {
+      position: fixed;
+      top: 0; left: 0; right: 0;
+      z-index: 200;
+      background: #7c2d12;
+      border-bottom: 1px solid #9a3412;
+      color: #fed7aa;
+      font-size: 13px;
+      padding: 10px 16px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      transform: translateY(-100%);
+      transition: transform 0.25s ease;
+    }
+    #quota-banner.show { transform: translateY(0); }
+    #quota-banner strong { color: #fff; }
+    #quota-banner .quota-msg { flex: 1; line-height: 1.5; }
+    #quota-banner .quota-close {
+      background: rgba(255,255,255,0.15);
+      border: none; color: #fff;
+      width: 28px; height: 28px;
+      border-radius: 6px; font-size: 16px;
+      cursor: pointer; flex-shrink: 0;
+      display: flex; align-items: center; justify-content: center;
+      transition: background 0.15s;
+    }
+    #quota-banner .quota-close:hover { background: rgba(255,255,255,0.25); }
+
     /* ── Fullscreen viewer ── */
     #viewer-overlay {
       position: fixed; inset: 0; background: #000; z-index: 100;
@@ -495,6 +537,17 @@
   <div id="psv-container"></div>
 </div>
 
+<!-- Quota warning banner -->
+<div id="quota-banner" role="alert" aria-live="assertive">
+  <span>⚠️</span>
+  <div class="quota-msg">
+    <strong>Storage limit reached.</strong>
+    Thumbnail data could not be saved — your browser's localStorage is full.
+    Remove an album to free space, or use Chrome/Edge for unlimited persistence.
+  </div>
+  <button class="quota-close" id="quota-close" title="Dismiss">✕</button>
+</div>
+
 <video id="hidden-video" loop playsinline muted preload="auto" style="display:none"></video>
 
 <script type="module">
@@ -521,11 +574,42 @@
   let currentBlobURL = null;
   const hiddenVideo  = document.getElementById('hidden-video');
 
+  // ── Lazy thumbnail observer ───────────────────────────────────────
+  // Generates thumbnails only when a card scrolls into view.
+  // Fires once per card (unobserves after generation starts).
+  const thumbObserver = new IntersectionObserver((entries) => {
+    for (const entry of entries) {
+      if (!entry.isIntersecting) continue;
+      const card = entry.target;
+      thumbObserver.unobserve(card);
+      const key  = card.dataset.key;
+      // Find the item this card represents
+      const item = filteredItems.find(i => itemKey(i) === key);
+      if (!item || item.thumbURL || !item.file) continue;
+      generateThumb(item).then(dataURL => {
+        if (!dataURL) return;
+        item.thumbURL = dataURL;
+        updateMediaCardThumb(item);
+        // Promote to album cover if none set yet
+        const album = albums.find(a => a.id === item.albumId);
+        if (album && !album.coverURL) {
+          album.coverURL = dataURL;
+          updateAlbumCover(album);
+        }
+        saveToStorage();
+      });
+    }
+  }, { rootMargin: '200px' }); // 200 px lookahead so thumbs load before cards reach viewport
+
   // ── Persistence ───────────────────────────────────────────────────
   const LS_KEY = 'psv-library-v1';
 
   function saveToStorage() {
-    // Save album metadata only — not file blobs (too large)
+    // Save album metadata only — not file blobs (too large).
+    // Item thumbURLs are NOT persisted (cover-only strategy): only one
+    // coverURL per album is stored, reducing localStorage from
+    // (albums × files × ~20 KB) down to (albums × ~20 KB).
+    // Thumbs are regenerated lazily via IntersectionObserver on next visit.
     const data = albums.map(a => ({
       id:        a.id,
       name:      a.name,
@@ -535,11 +619,22 @@
         name:      i.name,
         type:      i.type,
         size:      i.file?.size || i.size || 0,
-        thumbURL:  i.thumbURL || null,
+        thumbURL:  null,   // not persisted — regenerated lazily on restore
         dateAdded: i.dateAdded,
       })),
     }));
-    try { localStorage.setItem(LS_KEY, JSON.stringify(data)); } catch (_) {}
+    try {
+      localStorage.setItem(LS_KEY, JSON.stringify(data));
+    } catch (e) {
+      if (e.name === 'QuotaExceededError' || e.name === 'NS_ERROR_DOM_QUOTA_REACHED') {
+        showQuotaBanner();
+      }
+    }
+  }
+
+  function showQuotaBanner() {
+    if (HAS_FSA) return; // FSA users don't use localStorage — banner irrelevant
+    document.getElementById('quota-banner').classList.add('show');
   }
 
   function loadFromStorage() {
@@ -745,21 +840,13 @@
       album.items.push(item);
     }
 
-    // Generate thumbnails async
-    for (const item of album.items.filter(i => !i.thumbURL)) {
-      generateThumb(item).then(dataURL => {
-        item.thumbURL = dataURL;
-        if (!album.coverURL && dataURL) {
-          album.coverURL = dataURL;
-          updateAlbumCover(album);
-        }
-        updateMediaCardThumb(item);
-        saveToStorage();
-      });
-    }
-
-    if (!album.coverURL && album.items[0]?.thumbURL) {
-      album.coverURL = album.items[0].thumbURL;
+    // Thumbnail generation is lazy — the IntersectionObserver in
+    // renderMediaGrid handles it when cards scroll into view.
+    // Album cover: set from the first item that already has a thumbURL
+    // (e.g. on re-import when thumbs were already generated this session).
+    if (!album.coverURL) {
+      const withThumb = album.items.find(i => i.thumbURL);
+      if (withThumb) album.coverURL = withThumb.thumbURL;
     }
 
     saveToStorage();
@@ -921,14 +1008,8 @@
       let card   = grid.querySelector(`.media-card[data-key="${CSS.escape(key)}"]`);
       if (!card) {
         card = createMediaCard(item);
-        // Trigger thumb generation if not done yet
-        if (!item.thumbURL && item.file) {
-          generateThumb(item).then(dataURL => {
-            item.thumbURL = dataURL;
-            updateMediaCardThumb(item);
-            saveToStorage();
-          });
-        }
+        // Observe for lazy thumb generation
+        thumbObserver.observe(card);
       }
       grid.appendChild(card); // move to end = correct order
     });
@@ -1018,6 +1099,10 @@
   document.getElementById('sort-select').addEventListener('change', e => {
     activeSort = e.target.value;
     applyFilterAndSort();
+  });
+
+  document.getElementById('quota-close').addEventListener('click', () => {
+    document.getElementById('quota-banner').classList.remove('show');
   });
 
   // ── Import controls ───────────────────────────────────────────────
@@ -1259,16 +1344,8 @@
         const file = await entry.getFile();
         item.file = file;
         item.size = file.size;
-        // Regenerate thumb if missing
-        if (!item.thumbURL) {
-          generateThumb(item).then(dataURL => {
-            item.thumbURL = dataURL;
-            if (!album.coverURL && dataURL) album.coverURL = dataURL;
-            updateMediaCardThumb(item);
-            updateAlbumCover(album);
-            saveToStorage();
-          });
-        }
+        // thumbURL will be regenerated lazily by IntersectionObserver
+        // when the card scrolls into view — no need to persist it here.
       } catch (_) {}
     }
   }
