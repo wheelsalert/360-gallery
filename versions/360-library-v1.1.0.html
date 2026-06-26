@@ -3,26 +3,22 @@
   ============================================================
   360° Library
   ============================================================
-  Version  : 1.2.0
+  Version  : 1.1.0
   Date     : 2025-06-26
   File     : 360-library.html
 
   Changelog:
-  1.2.0 - Bold & Immersive redesign + responsive CSS
-        - New design tokens: deep blue-tinted black (#05050a base),
-          layered surfaces, near-invisible borders
-        - Full responsive layout via CSS Grid auto-fill + @media
-          breakpoints at 900px (tablet) and 600px / 380px (mobile)
-        - White "Add folder" primary button for contrast pop
-        - Redesigned "All media" hero button with icon slot
-        - Ghost "Add folder" card always visible at end of albums grid
-        - Thumbnail badges moved onto image (bottom-left), out of card body
-        - Tinted photo/video placeholders (#0d1525 blue / #130d10 warm)
-        - Circle play/view overlay icon on card hover
-        - Slimmer header (54px), pill item count, tighter filter group
-        - Backdrop-filter blur on header for depth
-        - Softer radius-lg (14px) on cards
-        - Persistent notice and quota banner styling updated to match
+  1.1.0 - Fix localStorage scaling for 100+ folder libraries
+        - Quota protection: catch QuotaExceededError, show dismissible
+          warning banner instead of silently failing
+        - Album-cover-only thumbnail storage: item thumbURLs are no longer
+          persisted to localStorage, only one coverURL per album is saved,
+          reducing storage from (albums × files × ~20 KB) to (albums × ~20 KB)
+        - Lazy thumbnail generation: IntersectionObserver generates thumbs
+          only when cards scroll into view (200 px lookahead), preventing
+          mass Canvas work on import and on page restore
+        - Removed saveToStorage() from FSA reload loop to prevent
+          re-inflating localStorage with per-item thumbs on return visits
 
   1.0.2 - Fix re-import not refreshing files on Safari
         - createAlbum() was skipping existing items on re-import
@@ -87,29 +83,21 @@
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
-    /* ── Design tokens ── */
     :root {
-      --bg:          #05050a;
-      --surface:     #0d0d18;
-      --surface2:    #12121f;
-      --surface3:    #17172a;
-      --border:      rgba(255,255,255,0.05);
-      --border2:     rgba(255,255,255,0.10);
-      --border3:     rgba(255,255,255,0.16);
-      --text:        #dde1f0;
-      --text2:       #8890aa;
-      --muted:       #3a3d52;
-      --accent:      #5b8dee;
-      --accent-dim:  rgba(91,141,238,0.12);
-      --accent-glow: rgba(91,141,238,0.08);
-      --amber:       #e8933a;
-      --amber-dim:   rgba(232,147,58,0.12);
-      --radius-sm:   6px;
-      --radius:      10px;
-      --radius-lg:   14px;
-      --thumb-h:     170px;
-      --album-h:     190px;
-      --hdr-h:       54px;
+      --bg:         #0a0a0a;
+      --surface:    #141414;
+      --surface2:   #1e1e1e;
+      --border:     rgba(255,255,255,0.08);
+      --border2:    rgba(255,255,255,0.14);
+      --text:       #e8e8e8;
+      --muted:      #666;
+      --accent:     #5b8dee;
+      --accent-dim: #1e2d4a;
+      --amber:      #f5a623;
+      --amber-dim:  #2d2010;
+      --radius:     10px;
+      --thumb-h:    180px;
+      --album-h:    200px;
     }
 
     html, body {
@@ -126,26 +114,18 @@
     header {
       display: flex;
       align-items: center;
-      gap: 10px;
-      padding: 0 20px;
-      height: var(--hdr-h);
+      gap: 12px;
+      padding: 14px 24px;
       border-bottom: 1px solid var(--border);
       position: sticky;
       top: 0;
-      background: rgba(5,5,10,0.88);
-      backdrop-filter: blur(16px);
-      -webkit-backdrop-filter: blur(16px);
+      background: rgba(10,10,10,0.92);
+      backdrop-filter: blur(12px);
       z-index: 50;
+      flex-wrap: wrap;
     }
 
-    .logo {
-      font-size: 15px;
-      font-weight: 500;
-      color: #fff;
-      letter-spacing: -0.3px;
-      flex-shrink: 0;
-      white-space: nowrap;
-    }
+    .logo { font-size: 16px; font-weight: 600; color: #fff; flex-shrink: 0; }
     .logo span { color: var(--accent); }
 
     /* Breadcrumb */
@@ -154,21 +134,19 @@
       align-items: center;
       gap: 6px;
       font-size: 13px;
-      color: var(--text2);
+      color: var(--muted);
       flex: 1;
       min-width: 0;
-      overflow: hidden;
     }
-    .breadcrumb-sep { color: var(--muted); }
+    .breadcrumb-sep { opacity: 0.4; }
     .breadcrumb-link {
       color: var(--accent);
       cursor: pointer;
       white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;
-      transition: opacity 0.15s;
     }
-    .breadcrumb-link:hover { opacity: 0.75; }
+    .breadcrumb-link:hover { text-decoration: underline; }
     .breadcrumb-current {
       color: var(--text);
       white-space: nowrap;
@@ -180,440 +158,245 @@
       display: flex;
       align-items: center;
       gap: 8px;
+      flex-wrap: wrap;
       margin-left: auto;
-      flex-shrink: 0;
     }
 
-    .item-count {
-      font-size: 12px;
-      color: var(--text2);
-      white-space: nowrap;
-      padding: 3px 10px;
-      background: var(--surface2);
-      border: 1px solid var(--border);
-      border-radius: 20px;
-    }
+    .item-count { font-size: 12px; color: var(--muted); white-space: nowrap; }
 
-    /* Filter + sort */
+    /* Filter + sort — only visible inside an album or all-media */
     .filter-group {
       display: flex;
       background: var(--surface);
-      border: 1px solid var(--border2);
-      border-radius: var(--radius-sm);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
       overflow: hidden;
     }
     .filter-btn {
-      background: none;
-      border: none;
-      color: var(--text2);
-      padding: 5px 12px;
-      font-size: 12px;
-      font-weight: 500;
-      cursor: pointer;
+      background: none; border: none; color: var(--muted);
+      padding: 6px 12px; font-size: 13px; cursor: pointer;
       transition: color 0.15s, background 0.15s;
-      white-space: nowrap;
     }
     .filter-btn:hover { color: var(--text); background: var(--surface2); }
-    .filter-btn.active { color: #fff; background: var(--accent-dim); border-color: var(--accent); }
+    .filter-btn.active { color: #fff; background: var(--accent-dim); }
 
     .sort-select {
-      background: var(--surface);
-      border: 1px solid var(--border2);
-      border-radius: var(--radius-sm);
-      color: var(--text);
-      padding: 5px 10px;
-      font-size: 12px;
-      cursor: pointer;
-      outline: none;
-      transition: border-color 0.15s;
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: var(--radius); color: var(--text);
+      padding: 6px 10px; font-size: 13px; cursor: pointer; outline: none;
     }
     .sort-select:focus { border-color: var(--accent); }
 
     .btn {
-      display: flex;
-      align-items: center;
-      gap: 6px;
-      padding: 6px 14px;
-      border: none;
-      border-radius: var(--radius-sm);
-      font-size: 13px;
-      font-weight: 500;
-      cursor: pointer;
+      display: flex; align-items: center; gap: 6px;
+      padding: 6px 14px; border: none; border-radius: var(--radius);
+      font-size: 13px; font-weight: 500; cursor: pointer;
       transition: opacity 0.15s;
-      white-space: nowrap;
-      min-height: 32px;
     }
     .btn:hover { opacity: 0.85; }
-    .btn-primary { background: #fff; color: #05050a; }
-    .btn-secondary {
-      background: var(--surface2);
-      color: var(--text);
-      border: 1px solid var(--border2);
-    }
-    .btn-secondary:hover { border-color: var(--border3); background: var(--surface3); }
+    .btn-primary { background: var(--accent); color: #fff; }
+    .btn-secondary { background: var(--surface); color: var(--text); border: 1px solid var(--border); }
+    .btn-secondary:hover { border-color: var(--border2); }
 
     #folder-input { display: none; }
 
     /* ── Main ── */
-    main {
-      padding: 24px 20px;
-      min-height: calc(100vh - var(--hdr-h));
-      max-width: 1600px;
-      margin: 0 auto;
-    }
+    main { padding: 24px; min-height: calc(100vh - 57px); }
 
     /* ── Empty / drop state ── */
     #empty-state {
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      justify-content: center;
-      gap: 20px;
-      min-height: calc(100vh - 160px);
-      text-align: center;
+      display: flex; flex-direction: column; align-items: center;
+      justify-content: center; gap: 16px;
+      min-height: calc(100vh - 140px); text-align: center;
     }
     #empty-state.hidden { display: none; }
 
     .drop-ring {
-      width: 100px;
-      height: 100px;
-      border: 1px solid var(--border2);
-      border-radius: 50%;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      font-size: 36px;
-      transition: border-color 0.2s, background 0.2s;
-      background: var(--surface);
+      width: 120px; height: 120px;
+      border: 2px dashed var(--border2); border-radius: 50%;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 40px; transition: border-color 0.2s, background 0.2s;
     }
-    body.dragging-over .drop-ring {
-      border-color: var(--accent);
-      background: var(--accent-glow);
-    }
-    #empty-state h2 {
-      font-size: 22px;
-      font-weight: 500;
-      color: #fff;
-      letter-spacing: -0.3px;
-    }
-    #empty-state p {
-      font-size: 13px;
-      color: var(--text2);
-      max-width: 320px;
-      line-height: 1.8;
-    }
+    body.dragging-over .drop-ring { border-color: var(--accent); background: var(--accent-dim); }
+    #empty-state h2 { font-size: 20px; font-weight: 600; color: #fff; }
+    #empty-state p  { font-size: 13px; color: var(--muted); max-width: 340px; line-height: 1.7; }
     #empty-state em { color: var(--accent); font-style: normal; }
 
     /* Persistence notice */
     .persist-notice {
       font-size: 12px;
-      padding: 8px 16px;
-      border-radius: var(--radius-sm);
-      border: 1px solid var(--border2);
-      color: var(--text2);
+      padding: 8px 14px;
+      border-radius: var(--radius);
+      border: 1px solid var(--border);
+      color: var(--muted);
       max-width: 380px;
-      line-height: 1.6;
-      background: var(--surface);
     }
     .persist-notice.has-fsa {
-      border-color: rgba(91,141,238,0.25);
+      border-color: rgba(91,141,238,0.3);
       background: var(--accent-dim);
       color: #7aa3f0;
     }
 
-    /* ── Albums view ── */
+    /* ── Albums grid ── */
     #albums-view { display: none; }
     #albums-view.active { display: block; }
 
-    /* All media hero button */
-    .all-media-btn {
-      display: flex;
-      align-items: center;
-      gap: 12px;
-      padding: 14px 18px;
-      background: var(--surface);
-      border: 1px solid var(--border2);
-      border-radius: var(--radius-lg);
-      color: var(--text);
-      cursor: pointer;
-      width: 100%;
-      margin-bottom: 28px;
-      transition: border-color 0.15s, background 0.15s;
-      text-align: left;
-    }
-    .all-media-btn:hover {
-      border-color: var(--border3);
-      background: var(--surface2);
-    }
-    .all-media-icon {
-      width: 36px;
-      height: 36px;
-      background: var(--accent-dim);
-      border-radius: var(--radius-sm);
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      font-size: 18px;
-      flex-shrink: 0;
-    }
-    .all-media-label {
-      font-size: 14px;
-      font-weight: 500;
-      color: #fff;
-      flex: 1;
-    }
-    .all-media-btn .all-count {
-      font-size: 12px;
-      color: var(--text2);
-      background: var(--surface2);
-      padding: 3px 10px;
-      border-radius: 20px;
-      border: 1px solid var(--border);
-    }
-
     .section-title {
-      font-size: 11px;
+      font-size: 13px;
       font-weight: 500;
       color: var(--muted);
       text-transform: uppercase;
-      letter-spacing: 0.8px;
-      margin-bottom: 14px;
+      letter-spacing: 0.6px;
+      margin-bottom: 16px;
     }
 
-    /* Albums grid — responsive */
     .albums-grid {
       display: grid;
-      grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
-      gap: 12px;
+      grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+      gap: 16px;
       margin-bottom: 32px;
     }
 
     .album-card {
       background: var(--surface);
       border: 1px solid var(--border);
-      border-radius: var(--radius-lg);
+      border-radius: var(--radius);
       overflow: hidden;
       cursor: pointer;
-      transition: border-color 0.2s, transform 0.2s;
+      transition: border-color 0.15s, transform 0.15s;
       position: relative;
     }
-    .album-card:hover {
-      border-color: var(--border3);
-      transform: translateY(-3px);
-    }
-
-    /* Ghost "Add folder" card */
-    .album-card-ghost {
-      background: transparent;
-      border: 1px dashed var(--border2);
-      border-radius: var(--radius-lg);
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      justify-content: center;
-      gap: 8px;
-      cursor: pointer;
-      min-height: calc(var(--album-h) + 52px);
-      transition: border-color 0.15s, background 0.15s;
-      color: var(--muted);
-      font-size: 13px;
-    }
-    .album-card-ghost:hover {
-      border-color: var(--accent);
-      background: var(--accent-glow);
-      color: var(--accent);
-    }
-    .album-card-ghost svg {
-      width: 28px;
-      height: 28px;
-      stroke: currentColor;
-      stroke-width: 1.5;
-      fill: none;
-    }
+    .album-card:hover { border-color: var(--border2); transform: translateY(-2px); }
 
     .album-cover {
-      width: 100%;
-      height: var(--album-h);
-      object-fit: cover;
-      display: block;
-      background: var(--surface2);
+      width: 100%; height: var(--album-h);
+      object-fit: cover; display: block; background: var(--surface2);
     }
     .album-cover-placeholder {
-      width: 100%;
-      height: var(--album-h);
+      width: 100%; height: var(--album-h);
       background: var(--surface2);
+      display: flex; align-items: center; justify-content: center;
+      font-size: 40px; color: var(--muted);
+    }
+    .album-body { padding: 10px 12px 12px; }
+    .album-name {
+      font-size: 14px; font-weight: 500; color: #fff;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+      margin-bottom: 4px;
+    }
+    .album-meta { font-size: 12px; color: var(--muted); }
+
+    /* All media button row */
+    .all-media-row {
       display: flex;
       align-items: center;
-      justify-content: center;
-      font-size: 36px;
+      justify-content: space-between;
+      margin-bottom: 16px;
     }
-    /* Tinted placeholder for photo vs video vs mixed */
-    .album-cover-placeholder.ph { background: #0d1525; }
-    .album-cover-placeholder.vi { background: #130d10; }
-
-    .album-body { padding: 11px 13px 13px; }
-    .album-name {
+    .all-media-btn {
+      display: flex; align-items: center; gap: 8px;
+      padding: 10px 16px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      color: var(--text);
+      cursor: pointer;
       font-size: 13px;
       font-weight: 500;
-      color: #fff;
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      margin-bottom: 3px;
+      transition: border-color 0.15s, background 0.15s;
+      width: 100%;
+      margin-bottom: 24px;
     }
-    .album-meta { font-size: 11px; color: var(--text2); }
+    .all-media-btn:hover { border-color: var(--border2); background: var(--surface2); }
+    .all-media-btn .all-count { margin-left: auto; color: var(--muted); font-size: 12px; }
 
-    /* ── Media view ── */
+    /* ── Media grid (inside album or all-media) ── */
     #media-view { display: none; }
     #media-view.active { display: block; }
 
-    /* Media grid — responsive */
     .media-grid {
       display: grid;
-      grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
-      gap: 12px;
+      grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+      gap: 16px;
     }
 
     .media-card {
       background: var(--surface);
       border: 1px solid var(--border);
-      border-radius: var(--radius-lg);
+      border-radius: var(--radius);
       overflow: hidden;
       cursor: pointer;
-      transition: border-color 0.2s, transform 0.2s;
+      transition: border-color 0.15s, transform 0.15s;
       position: relative;
     }
-    .media-card:hover {
-      border-color: var(--border3);
-      transform: translateY(-3px);
-    }
+    .media-card:hover { border-color: var(--border2); transform: translateY(-2px); }
     .media-card:hover .card-overlay { opacity: 1; }
 
     .card-thumb {
-      width: 100%;
-      height: var(--thumb-h);
-      object-fit: cover;
-      display: block;
-      background: var(--surface2);
+      width: 100%; height: var(--thumb-h);
+      object-fit: cover; display: block; background: var(--surface2);
     }
     .card-thumb-placeholder {
-      width: 100%;
-      height: var(--thumb-h);
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      font-size: 28px;
+      width: 100%; height: var(--thumb-h);
+      background: var(--surface2);
+      display: flex; align-items: center; justify-content: center;
+      font-size: 32px; color: var(--muted);
     }
-    /* Tinted placeholders */
-    .card-thumb-placeholder.ph { background: #0d1525; }
-    .card-thumb-placeholder.vi { background: #130d10; }
-
-    /* Play/view overlay on hover */
     .card-overlay {
-      position: absolute;
-      inset: 0;
-      height: var(--thumb-h);
-      background: rgba(0,0,0,0.35);
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      opacity: 0;
-      transition: opacity 0.2s;
+      position: absolute; inset: 0 0 auto 0; height: var(--thumb-h);
+      background: rgba(0,0,0,0.3);
+      display: flex; align-items: center; justify-content: center;
+      opacity: 0; transition: opacity 0.2s; font-size: 36px;
     }
-    .card-overlay-icon {
-      width: 44px;
-      height: 44px;
-      background: rgba(255,255,255,0.15);
-      border: 1px solid rgba(255,255,255,0.2);
-      border-radius: 50%;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      font-size: 18px;
-      color: #fff;
-    }
-
-    /* Badge sits on thumbnail, bottom-left */
-    .thumb-badge {
-      position: absolute;
-      bottom: 8px;
-      left: 8px;
-      font-size: 10px;
-      font-weight: 500;
-      letter-spacing: 0.3px;
-      padding: 2px 7px;
-      border-radius: 4px;
-    }
-    .badge-photo { background: rgba(91,141,238,0.2); color: #7aa3f0; border: 1px solid rgba(91,141,238,0.2); }
-    .badge-video { background: rgba(232,147,58,0.2); color: #e8933a; border: 1px solid rgba(232,147,58,0.2); }
-    .badge-album { background: rgba(180,140,255,0.15); color: #b48cff; border: 1px solid rgba(180,140,255,0.15); }
-
     .card-body { padding: 10px 12px 12px; }
-    .card-badges { display: flex; gap: 6px; margin-bottom: 5px; flex-wrap: wrap; }
-    /* Inline badges (album name in all-media view) */
+    .card-badges { display: flex; gap: 6px; margin-bottom: 6px; flex-wrap: wrap; }
     .badge {
-      font-size: 10px;
-      font-weight: 500;
-      letter-spacing: 0.3px;
-      padding: 2px 7px;
-      border-radius: 4px;
+      font-size: 10px; font-weight: 600; letter-spacing: 0.4px;
+      text-transform: uppercase; padding: 2px 7px; border-radius: 4px;
     }
+    .badge-photo { background: rgba(91,141,238,0.15); color: #7aa3f0; }
+    .badge-video { background: rgba(255,165,50,0.15); color: #ffa832; }
+    .badge-album { background: rgba(245,166,35,0.15); color: #f5c96a; }
     .card-name {
-      font-size: 13px;
-      font-weight: 500;
-      color: var(--text);
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      margin-bottom: 2px;
+      font-size: 13px; font-weight: 500; color: var(--text);
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-bottom: 2px;
     }
-    .card-meta { font-size: 11px; color: var(--text2); }
+    .card-meta { font-size: 11px; color: var(--muted); }
 
     /* Loading spinner */
     .thumb-loading {
-      width: 100%;
-      height: var(--thumb-h);
+      width: 100%; height: var(--thumb-h);
       background: var(--surface2);
-      display: flex;
-      align-items: center;
-      justify-content: center;
+      display: flex; align-items: center; justify-content: center;
     }
     @keyframes spin { to { transform: rotate(360deg); } }
     .spinner {
-      width: 18px;
-      height: 18px;
-      border: 1.5px solid var(--border2);
-      border-top-color: var(--accent);
-      border-radius: 50%;
-      animation: spin 0.7s linear infinite;
+      width: 20px; height: 20px;
+      border: 2px solid var(--border2); border-top-color: var(--accent);
+      border-radius: 50%; animation: spin 0.7s linear infinite;
     }
 
-    /* Empty filter state */
+    /* Empty filter */
     #empty-filter {
-      display: none;
-      flex-direction: column;
-      align-items: center;
-      gap: 8px;
-      padding: 80px 0;
-      text-align: center;
-      color: var(--text2);
+      display: none; flex-direction: column; align-items: center;
+      gap: 8px; padding: 80px 0; text-align: center; color: var(--muted);
     }
     #empty-filter.show { display: flex; }
-    #empty-filter span { font-size: 28px; }
+    #empty-filter span { font-size: 32px; }
 
     /* ── Quota warning banner ── */
     #quota-banner {
       position: fixed;
       top: 0; left: 0; right: 0;
       z-index: 200;
-      background: #4a1a08;
-      border-bottom: 1px solid rgba(220,80,30,0.3);
-      color: #f5b89a;
+      background: #7c2d12;
+      border-bottom: 1px solid #9a3412;
+      color: #fed7aa;
       font-size: 13px;
-      padding: 10px 20px;
+      padding: 10px 16px;
       display: flex;
       align-items: center;
-      gap: 12px;
+      gap: 10px;
       transform: translateY(-100%);
       transition: transform 0.25s ease;
     }
@@ -621,163 +404,55 @@
     #quota-banner strong { color: #fff; }
     #quota-banner .quota-msg { flex: 1; line-height: 1.5; }
     #quota-banner .quota-close {
-      background: rgba(255,255,255,0.1);
-      border: none;
-      color: #fff;
-      width: 28px;
-      height: 28px;
-      border-radius: var(--radius-sm);
-      font-size: 16px;
-      cursor: pointer;
-      flex-shrink: 0;
-      display: flex;
-      align-items: center;
-      justify-content: center;
+      background: rgba(255,255,255,0.15);
+      border: none; color: #fff;
+      width: 28px; height: 28px;
+      border-radius: 6px; font-size: 16px;
+      cursor: pointer; flex-shrink: 0;
+      display: flex; align-items: center; justify-content: center;
       transition: background 0.15s;
     }
-    #quota-banner .quota-close:hover { background: rgba(255,255,255,0.2); }
+    #quota-banner .quota-close:hover { background: rgba(255,255,255,0.25); }
 
     /* ── Fullscreen viewer ── */
     #viewer-overlay {
-      position: fixed;
-      inset: 0;
-      background: #000;
-      z-index: 100;
-      display: none;
-      flex-direction: column;
+      position: fixed; inset: 0; background: #000; z-index: 100;
+      display: none; flex-direction: column;
     }
     #viewer-overlay.open { display: flex; }
 
     .viewer-header {
-      display: flex;
-      align-items: center;
-      gap: 12px;
-      padding: 12px 16px;
-      background: rgba(0,0,0,0.7);
-      position: absolute;
-      top: 0; left: 0; right: 0;
-      z-index: 10;
+      display: flex; align-items: center; gap: 12px;
+      padding: 12px 16px; background: rgba(0,0,0,0.6);
+      position: absolute; top: 0; left: 0; right: 0; z-index: 10;
     }
     .viewer-close {
-      background: rgba(255,255,255,0.08);
-      border: 1px solid rgba(255,255,255,0.1);
-      color: #fff;
-      width: 36px;
-      height: 36px;
-      border-radius: var(--radius-sm);
-      font-size: 16px;
-      cursor: pointer;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      transition: background 0.15s;
-      flex-shrink: 0;
+      background: rgba(255,255,255,0.1); border: none; color: #fff;
+      width: 36px; height: 36px; border-radius: 8px; font-size: 18px;
+      cursor: pointer; display: flex; align-items: center; justify-content: center;
+      transition: background 0.15s; flex-shrink: 0;
     }
-    .viewer-close:hover { background: rgba(255,255,255,0.16); }
+    .viewer-close:hover { background: rgba(255,255,255,0.2); }
 
     .viewer-info { flex: 1; min-width: 0; }
     .viewer-title {
-      font-size: 14px;
-      font-weight: 500;
-      color: #fff;
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
+      font-size: 14px; font-weight: 500; color: #fff;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
     }
-    .viewer-album {
-      font-size: 11px;
-      color: rgba(255,255,255,0.35);
-      margin-top: 2px;
-    }
+    .viewer-album { font-size: 11px; color: rgba(255,255,255,0.4); margin-top: 1px; }
 
     .viewer-nav { display: flex; gap: 6px; align-items: center; }
-    .viewer-counter {
-      font-size: 12px;
-      color: rgba(255,255,255,0.35);
-      white-space: nowrap;
-      padding-right: 4px;
-    }
+    .viewer-counter { font-size: 12px; color: rgba(255,255,255,0.4); white-space: nowrap; }
     .viewer-nav button {
-      background: rgba(255,255,255,0.08);
-      border: 1px solid rgba(255,255,255,0.1);
-      color: #fff;
-      width: 36px;
-      height: 36px;
-      border-radius: var(--radius-sm);
-      font-size: 18px;
-      cursor: pointer;
-      display: flex;
-      align-items: center;
-      justify-content: center;
+      background: rgba(255,255,255,0.1); border: none; color: #fff;
+      width: 36px; height: 36px; border-radius: 8px; font-size: 18px;
+      cursor: pointer; display: flex; align-items: center; justify-content: center;
       transition: background 0.15s;
     }
-    .viewer-nav button:hover { background: rgba(255,255,255,0.16); }
-    .viewer-nav button:disabled { opacity: 0.25; cursor: default; }
+    .viewer-nav button:hover { background: rgba(255,255,255,0.2); }
+    .viewer-nav button:disabled { opacity: 0.3; cursor: default; }
 
     #psv-container { flex: 1; width: 100%; }
-
-    /* ── Responsive breakpoints ── */
-
-    /* Tablet: tighten padding, keep multi-col */
-    @media (max-width: 900px) {
-      main { padding: 18px 16px; }
-      .albums-grid,
-      .media-grid {
-        grid-template-columns: repeat(auto-fill, minmax(170px, 1fr));
-        gap: 10px;
-      }
-      :root {
-        --album-h: 160px;
-        --thumb-h: 150px;
-      }
-    }
-
-    /* Mobile: 2-col grid, collapsed header */
-    @media (max-width: 600px) {
-      header { padding: 0 14px; gap: 8px; }
-      .logo { font-size: 14px; }
-
-      /* Hide filter/sort/count in header on mobile — too cramped */
-      .item-count { display: none; }
-      .filter-group { display: none !important; }
-      .sort-select  { display: none !important; }
-
-      main { padding: 14px 12px; }
-
-      .all-media-btn { padding: 12px 14px; margin-bottom: 20px; }
-      .all-media-icon { width: 30px; height: 30px; font-size: 15px; }
-      .all-media-label { font-size: 13px; }
-
-      .albums-grid,
-      .media-grid {
-        grid-template-columns: repeat(2, 1fr);
-        gap: 8px;
-      }
-      :root {
-        --album-h: 130px;
-        --thumb-h: 120px;
-      }
-
-      .album-card-ghost { min-height: calc(var(--album-h) + 46px); }
-      .album-body { padding: 8px 10px 10px; }
-      .album-name { font-size: 12px; }
-      .card-body { padding: 8px 10px 10px; }
-      .card-name { font-size: 12px; }
-
-      /* Viewer nav: full-width on small screens */
-      .viewer-header { padding: 10px 12px; gap: 8px; }
-      .viewer-close { width: 32px; height: 32px; }
-      .viewer-nav button { width: 32px; height: 32px; font-size: 16px; }
-      .viewer-counter { display: none; }
-
-      /* Breadcrumb: truncate hard on small screens */
-      .breadcrumb { max-width: calc(100vw - 200px); }
-    }
-
-    /* Very small (≤ 380px): single column for albums, 2-col for media */
-    @media (max-width: 380px) {
-      .albums-grid { grid-template-columns: 1fr; }
-    }
   </style>
 </head>
 <body>
@@ -785,7 +460,9 @@
 <header>
   <div class="logo">360° <span>Library</span></div>
 
-  <div class="breadcrumb" id="breadcrumb"></div>
+  <div class="breadcrumb" id="breadcrumb">
+    <!-- populated by JS -->
+  </div>
 
   <div class="header-right" id="header-right">
     <span class="item-count" id="item-count"></span>
@@ -799,7 +476,7 @@
       <option value="name-desc">Name Z–A</option>
       <option value="type">Type</option>
     </select>
-    <button class="btn btn-primary" id="add-folder-btn">+ Add folder</button>
+    <button class="btn btn-secondary" id="add-folder-btn">＋ Add folder</button>
     <input type="file" id="folder-input" webkitdirectory multiple
       accept="image/jpeg,image/png,image/webp,video/mp4,video/webm">
   </div>
@@ -813,19 +490,19 @@
     <h2>Your 360° library</h2>
     <p>
       Drop a <em>folder</em> anywhere on this page,<br>
-      or click <em>Add folder</em> to get started.<br><br>
+      or click <em>Add folder</em> to browse.<br><br>
       Each folder becomes an album — name it something meaningful,<br>
       like <em>2025-05-05 NYC Trip</em>.
     </p>
-    <button class="btn btn-primary" id="empty-add-btn">+ Add folder</button>
+    <button class="btn btn-primary" id="empty-add-btn">Add folder</button>
     <div class="persist-notice" id="persist-notice"></div>
   </div>
 
   <!-- Albums view -->
   <div id="albums-view">
     <button class="all-media-btn" id="all-media-btn">
-      <div class="all-media-icon">🌐</div>
-      <span class="all-media-label">All media</span>
+      <span>🌐</span>
+      <span>All media</span>
       <span class="all-count" id="all-count"></span>
     </button>
     <div class="section-title">Albums</div>
@@ -1237,15 +914,10 @@
       const card = document.createElement('div');
       card.className = 'album-card';
       card.dataset.albumId = album.id;
-      // Guess dominant type for placeholder tint
-      const types = album.items.map(i => i.type);
-      const hasVideo = types.includes('video');
-      const hasPhoto = types.includes('photo');
-      const tint = (hasVideo && !hasPhoto) ? 'vi' : 'ph';
       card.innerHTML = `
         ${album.coverURL
           ? `<img class="album-cover" src="${album.coverURL}" alt="${album.name}">`
-          : `<div class="album-cover-placeholder ${tint}">📁</div>`}
+          : `<div class="album-cover-placeholder">📁</div>`}
         <div class="album-body">
           <div class="album-name" title="${album.name}">${album.name}</div>
           <div class="album-meta">${album.items.length} item${album.items.length !== 1 ? 's' : ''}</div>
@@ -1253,20 +925,6 @@
       card.addEventListener('click', () => openAlbum(album));
       grid.appendChild(card);
     });
-
-    // Ghost "Add folder" card always at end
-    const ghost = document.createElement('div');
-    ghost.className = 'album-card-ghost';
-    ghost.title = 'Add folder';
-    ghost.innerHTML = `
-      <svg viewBox="0 0 24 24" aria-hidden="true">
-        <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
-        <line x1="12" y1="11" x2="12" y2="17"/>
-        <line x1="9" y1="14" x2="15" y2="14"/>
-      </svg>
-      <span>Add folder</span>`;
-    ghost.addEventListener('click', handleAddFolder);
-    grid.appendChild(ghost);
   }
 
   function updateAlbumCover(album) {
@@ -1372,22 +1030,20 @@
     card.dataset.key = itemKey(item);
 
     const showAlbumBadge = currentView === 'all';
-    const tint = item.type === 'video' ? 'vi' : 'ph';
-    const overlayIcon = item.type === 'video' ? '▶' : '⊙';
 
     card.innerHTML = `
       ${item.thumbURL
         ? `<img class="card-thumb" src="${item.thumbURL}" alt="${item.name}">`
         : item.file
           ? `<div class="thumb-loading"><div class="spinner"></div></div>`
-          : `<div class="card-thumb-placeholder ${tint}">${item.type === 'video' ? '🎬' : '🌐'}</div>`
+          : `<div class="card-thumb-placeholder">${item.type === 'video' ? '🎬' : '🌐'}</div>`
       }
-      <div class="card-overlay">
-        <div class="card-overlay-icon">${overlayIcon}</div>
-      </div>
-      <span class="thumb-badge badge-${item.type}">${item.type}</span>
+      <div class="card-overlay">${item.type === 'video' ? '▶' : '⊙'}</div>
       <div class="card-body">
-        ${showAlbumBadge ? `<div class="card-badges"><span class="badge badge-album">${item.albumName}</span></div>` : ''}
+        <div class="card-badges">
+          <span class="badge badge-${item.type}">${item.type}</span>
+          ${showAlbumBadge ? `<span class="badge badge-album">${item.albumName}</span>` : ''}
+        </div>
         <div class="card-name" title="${item.name}">${item.name}</div>
         <div class="card-meta">${item.file ? formatSize(item.file.size) : formatSize(item.size || 0)}</div>
       </div>`;
@@ -1409,9 +1065,8 @@
       img.alt = item.name;
       placeholder.replaceWith(img);
     } else {
-      const tint = item.type === 'video' ? 'vi' : 'ph';
       const div = document.createElement('div');
-      div.className = `card-thumb-placeholder ${tint}`;
+      div.className = 'card-thumb-placeholder';
       div.textContent = item.type === 'video' ? '🎬' : '🌐';
       placeholder.replaceWith(div);
     }
