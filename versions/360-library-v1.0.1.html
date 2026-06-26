@@ -3,17 +3,11 @@
   ============================================================
   360° Library
   ============================================================
-  Version  : 1.0.2
+  Version  : 1.0.1
   Date     : 2025-06-25
   File     : 360-library.html
 
   Changelog:
-  1.0.2 - Fix re-import not refreshing files on Safari
-        - createAlbum() was skipping existing items on re-import
-          leaving item.file = null after restore from localStorage
-        - Now updates file reference on existing items so re-importing
-          the same folder restores full playback on Safari/Firefox
-
   1.0.1 - Add gyroscope navigation for mobile
         - GyroscopePlugin added to viewer
         - 'gyroscope' button added to both photo and video navbars
@@ -727,13 +721,7 @@
     }
 
     for (const file of files) {
-      const existing = album.items.find(i => i.name === file.name);
-      if (existing) {
-        // Re-import: refresh the file reference (Safari loses it between sessions)
-        existing.file = file;
-        existing.size = file.size;
-        continue;
-      }
+      if (album.items.find(i => i.name === file.name)) continue;
       const item = {
         file, name: file.name,
         type: fileType(file.name, file.type),

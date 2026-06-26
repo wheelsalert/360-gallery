@@ -3,20 +3,11 @@
   ============================================================
   360° Viewer
   ============================================================
-  Version  : 1.0.3
+  Version  : 1.0.2
   Date     : 2025-06-25
   File     : 360-viewer.html
 
   Changelog:
-  1.0.3 - Add gyroscope navigation for mobile
-        - GyroscopePlugin added to all viewers
-        - 'gyroscope' button added to navbar (toggle on/off)
-        - iOS: triggers DeviceOrientation permission prompt on first use
-        - Android: activates automatically, no prompt required
-
-  1.0.2 - Fix volume/mute button not appearing in video viewer navbar
-        - Correct VideoPlugin navbar button IDs: videoPlay, videoVolume, videoTime
-
   1.0.1 - Add volume/mute control to video navbar
         - 'caption' slot added to navbar so VideoPlugin injects
           its play + volume/mute buttons
@@ -45,7 +36,6 @@
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@photo-sphere-viewer/video-plugin@5.14.2/index.min.css">
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@photo-sphere-viewer/markers-plugin@5.14.2/index.min.css">
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@photo-sphere-viewer/autorotate-plugin@5.14.2/index.min.css">
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@photo-sphere-viewer/gyroscope-plugin@5.14.2/index.min.css">
 
   <script type="importmap">
   {
@@ -55,8 +45,7 @@
       "@photo-sphere-viewer/equirectangular-video-adapter": "https://cdn.jsdelivr.net/npm/@photo-sphere-viewer/equirectangular-video-adapter@5.14.2/index.module.js",
       "@photo-sphere-viewer/video-plugin":                  "https://cdn.jsdelivr.net/npm/@photo-sphere-viewer/video-plugin@5.14.2/index.module.js",
       "@photo-sphere-viewer/markers-plugin":                "https://cdn.jsdelivr.net/npm/@photo-sphere-viewer/markers-plugin@5.14.2/index.module.js",
-      "@photo-sphere-viewer/autorotate-plugin":             "https://cdn.jsdelivr.net/npm/@photo-sphere-viewer/autorotate-plugin@5.14.2/index.module.js",
-      "@photo-sphere-viewer/gyroscope-plugin":              "https://cdn.jsdelivr.net/npm/@photo-sphere-viewer/gyroscope-plugin@5.14.2/index.module.js"
+      "@photo-sphere-viewer/autorotate-plugin":             "https://cdn.jsdelivr.net/npm/@photo-sphere-viewer/autorotate-plugin@5.14.2/index.module.js"
     }
   }
   </script>
@@ -215,7 +204,6 @@
   import { VideoPlugin }                 from '@photo-sphere-viewer/video-plugin';
   import { MarkersPlugin }               from '@photo-sphere-viewer/markers-plugin';
   import { AutorotatePlugin }            from '@photo-sphere-viewer/autorotate-plugin';
-  import { GyroscopePlugin }             from '@photo-sphere-viewer/gyroscope-plugin';
 
   const PHOTO_KEY = 'psv-local-photo';
   let viewer = null;
@@ -279,8 +267,8 @@
         container: document.getElementById('viewer'),
         panorama: PHOTO_KEY,
         defaultYaw: 0, defaultPitch: 0, minFov: 30, maxFov: 90,
-        navbar: ['gyroscope', 'autorotate', 'zoom', 'move', 'fullscreen'],
-        plugins: [AutorotatePlugin, MarkersPlugin, GyroscopePlugin],
+        navbar: ['autorotate', 'zoom', 'move', 'fullscreen'],
+        plugins: [AutorotatePlugin, MarkersPlugin],
       });
       viewer.addEventListener('ready', () => { showStatus('Photo loaded — drag to look around, scroll to zoom'); resolve(); });
       viewer.addEventListener('error', e => { const m = e.error?.message || String(e.error); showError('Photo failed to load', m); reject(new Error(m)); });
@@ -302,8 +290,8 @@
         panorama: { source: hiddenVideo },
         minFov: 30, maxFov: 90,
         // 'caption' is where VideoPlugin injects its play + volume/mute buttons
-        navbar: ['gyroscope', 'autorotate', 'zoom', 'move', 'videoPlay', 'videoVolume', 'videoTime', 'fullscreen'],
-        plugins: [AutorotatePlugin, GyroscopePlugin, [VideoPlugin, { autoplay: true, muted: false }]],
+        navbar: ['autorotate', 'zoom', 'move', 'videoPlay', 'videoVolume', 'videoTime', 'fullscreen'],
+        plugins: [AutorotatePlugin, [VideoPlugin, { autoplay: true, muted: false }]],
       });
       viewer.addEventListener('ready', () => { showStatus('Video loaded — drag to look around, unmute in controls'); resolve(); });
       viewer.addEventListener('error', e => { const m = e.error?.message || String(e.error); showError('Panorama failed to load', m); reject(new Error(m)); });
